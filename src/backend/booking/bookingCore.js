@@ -522,23 +522,37 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
     const localStartDate = _toMadridLocalString(slot.localStartDate || slot.startDate);
     if (!localStartDate) return null;
 
-    let localEndDate = _toMadridLocalString(slot.localEndDate || slot.endDate);
-    if (!localEndDate) {
-        const startUtc = getUtcDateFromMadridLocal(localStartDate);
-        if (!startUtc) return null;
-        const durationMin = Number(defaultDurationMinutes || (CONCURRENCY && CONCURRENCY.DEFAULTDURATIONMIN) || 30);
-        localEndDate = getMadridLocalStringNoZ(new Date(startUtc.getTime() + exposureDuration  60  1000));
-    }
+  let localEndDate = _toMadridLocalString(
+    slot.localEndDate || slot.endDate
+);
 
-    const startDate = getUtcDateFromMadridLocal(localStartDate);
-    const endDate = getUtcDateFromMadridLocal(localEndDate);
-    if (!startDate || !endDate) return null;
-    if (endDate.getTime()  0) {
-        result.addOnIds = addOnIds.slice();
-        result.selectedAddOns = addOnIds.slice();
-    }
-    return result;
+if (!localEndDate) {
+    const startUtc = getUtcDateFromMadridLocal(localStartDate);
+    if (!startUtc) return null;
+
+    const durationMin = Number(
+        defaultDurationMinutes ||
+        (CONCURRENCY && CONCURRENCY.DEFAULTDURATIONMIN) ||
+        30
+    );
+
+    localEndDate = getMadridLocalStringNoZ(
+        new Date(startUtc.getTime() + durationMin * 60 * 1000)
+    );
 }
+
+const startDate = getUtcDateFromMadridLocal(localStartDate);
+const endDate = getUtcDateFromMadridLocal(localEndDate);
+
+if (!startDate || !endDate) return null;
+if (endDate.getTime() <= startDate.getTime()) return null;
+
+if (addOnIds.length > 0) {
+    result.addOnIds = addOnIds.slice();
+    result.selectedAddOns = addOnIds.slice();
+}
+
+return result;
 
 // =============================================================================
 // BLOQUE 8 - CHECKOUT URL HELPER
