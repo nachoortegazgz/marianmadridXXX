@@ -1,6 +1,6 @@
 /**
  * MODULE: pages/calendario-2.js
- * VERSION: v5003.4-FUNCTIONAL
+ * VERSION: v5003.5-FUNCTIONAL
  * STANDARDS: G10 ASCII Strict, Velo Native Optimized.
  */
 
@@ -34,6 +34,19 @@ let currentSlug = null;
 let currentService = null;
 let bridge = null;
 
+function normalizeIdList(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map((id) => _safeTrim(id))
+            .filter(Boolean);
+    }
+
+    return _safeTrim(value || "")
+        .split(",")
+        .map((id) => _safeTrim(id))
+        .filter(Boolean);
+}
+
 function parseUrlParams() {
     const query = wixLocation.query || {};
 
@@ -41,10 +54,7 @@ function parseUrlParams() {
         serviceId: _safeTrim(query.serviceId || ""),
         slug: _safeSlugOrId(query.slug || ""),
         referral: _safeTrim(query.referral || ""),
-        addOnIds: _safeTrim(query.addOnIds || "")
-            .split(",")
-            .map(_safeTrim)
-            .filter(Boolean)
+        addOnIds: normalizeIdList(query.addOnIds)
     };
 }
 
@@ -93,14 +103,19 @@ function createResultError(code, message) {
     };
 }
 
+function getTimeoutMs() {
+    return Number(UI && UI.FRONTEND_API_TIMEOUT_MS) || 60000;
+}
+
 async function loadServiceContext(params) {
     const lookup = currentServiceId || currentSlug;
     const result = await getServiceBySlugOrId(lookup);
 
     if (!result || result.status !== "SUCCESS" || !result.data) {
         throw new Error(
-            result?.error?.message ||
-            "No se pudo cargar el servicio."
+            result && result.error && result.error.message
+                ? result.error.message
+                : "No se pudo cargar el servicio."
         );
     }
 
@@ -117,17 +132,18 @@ async function loadServiceContext(params) {
     };
 }
 
-async function handleNavigation(payload) {
-    const target = _safeTrim(payload?.target || "").toUpperCase();
+function handleNavigation(payload) {
+    const target = _safeTrim(payload && payload.target || "")
+        .toUpperCase();
 
     if (target === "SERVICIOS") {
-        wixLocation.to(URLS?.SERVICIOS || "/reserva-online");
+        wixLocation.to(URLS && URLS.SERVICIOS || "/reserva-online");
         return true;
     }
 
     if (target === "PRIVACY") {
         wixLocation.to(
-            URLS?.PRIVACY_POLICY || "/politica-de-privacidad"
+            URLS && URLS.PRIVACY_POLICY || "/politica-de-privacidad"
         );
         return true;
     }
@@ -137,52 +153,75 @@ async function handleNavigation(payload) {
 
 async function handleAvailability(payload, reply) {
     const action = _safeTrim(payload.action || "").toLowerCase();
-    const addOnIds = Array.isArray(payload.addOnIds)
-        ? payload.addOnIds
-        : [];
+    const addOnIds = normalizeIdList(payload.addOnIds);
     let result;
 
     try {
         if (action === "days") {
-            result = await withTimeout(
-                getAvailableDays(
-                    currentServiceId || currentSlug,
-                    payload.resourceId || null,
-                    Number(payload.year),
-                    Number(payload.month),
-                    addOnIds
-                ),
-                UI?.FRONTEND_API_TIMEOUT_MS || 60000,
-                "getAvailableDays"
-            );
-        } else if (action === "slots") {
-            result = await withTimeout(
-                currentService?.allowCombine
-                    ? getCertifiedDualSlots(
+            const year = Number(payload.year);
+            const month = Number(payload.month);
+
+            if (
+                !Number.isInteger(year) ||
+                !Number.isInteger(month) ||
+                month < 1 ||
+                month > 12
+            ) {
+                result = createResultError(
+                    "INVALID_DATE_RANGE",
+                    "El mes o el año solicitado no es válido."
+                );
+            } else {
+                result = await withTimeout(
+                    getAvailableDays(
                         currentServiceId || currentSlug,
                         payload.resourceId || null,
-                        _safeTrim(payload.dateYMD || payload.dateYmd || ""),
-                        addOnIds
-                    )
-                    : getAvailableSlots(
-                        currentServiceId || currentSlug,
-                        payload.resourceId || null,
-                        _safeTrim(payload.dateYMD || payload.dateYmd || ""),
+                        year,
+                        month,
                         addOnIds
                     ),
-                UI?.FRONTEND_API_TIMEOUT_MS || 60000,
-                "getAvailableSlots"
+                    getTimeoutMs(),
+                    "getAvailableDays"
+                );
+            }
+        } else if (action === "slots") {
+            const dateYMD = _safeTrim(
+                payload.dateYMD || payload.dateYmd || ""
             );
+
+            if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(dateYMD)) {
+                result = createResultError(
+                    "INVALID_DATE",
+                    "La fecha solicitada no es válida."
+                );
+            } else {
+                const getSlots = currentService && currentService.allowCombine
+                    ? getCertifiedDualSlots
+                    : getAvailableSlots;
+
+                result = await withTimeout(
+                    getSlots(
+                        currentServiceId || currentSlug,
+                        payload.resourceId || null,
+                        dateYMD,
+                        addOnIds
+                    ),
+                    getTimeoutMs(),
+                    "getAvailableSlots"
+                );
+            }
         } else {
             result = createResultError(
                 "INVALID_AVAILABILITY_REQUEST",
-                "Solicitud de disponibilidad no valida."
+                "Solicitud de disponibilidad no válida."
             );
         }
     } catch (error) {
         result = createResultError(
             "AVAILABILITY_FAILED",
-            error?.message || "No se pudo obtener disponibilidad."
+            error && error.message
+                ? error.message
+                : "No se pudo obtener disponibilidad."
         );
     }
 
@@ -191,7 +230,7 @@ async function handleAvailability(payload, reply) {
         {
             ...(result || createResultError(
                 "EMPTY_AVAILABILITY_RESPONSE",
-                "No se recibio disponibilidad."
+                "No se recibió disponibilidad."
             )),
             action,
             requestSequence: payload.requestSequence || 0
@@ -208,7 +247,7 @@ async function handleSelection(payload, reply) {
             MESSAGE_TYPES.SELECT,
             createResultError(
                 "INVALID_SLOT",
-                "El horario seleccionado no es valido."
+                "El horario seleccionado no es válido."
             ),
             payload
         );
@@ -221,12 +260,10 @@ async function handleSelection(payload, reply) {
                 currentServiceId || currentSlug,
                 start,
                 payload.resourceId || null,
-                Array.isArray(payload.addOnIds)
-                    ? payload.addOnIds
-                    : [],
+                normalizeIdList(payload.addOnIds),
                 null
             ),
-            UI?.FRONTEND_API_TIMEOUT_MS || 60000,
+            getTimeoutMs(),
             "resolveStaffForSlot"
         );
 
@@ -243,7 +280,9 @@ async function handleSelection(payload, reply) {
             MESSAGE_TYPES.SELECT,
             createResultError(
                 "STAFF_RESOLVE_FAILED",
-                error?.message || "No se pudo validar el profesional."
+                error && error.message
+                    ? error.message
+                    : "No se pudo validar el profesional."
             ),
             payload
         );
@@ -252,18 +291,20 @@ async function handleSelection(payload, reply) {
 
 async function handleBooking(message, reply, traceId) {
     const payload = getPayload(message);
+    const nestedBooking = payload.bookingData;
     const bookingData =
-        payload.bookingData &&
-        typeof payload.bookingData === "object"
-            ? payload.bookingData
+        nestedBooking &&
+        typeof nestedBooking === "object" &&
+        !Array.isArray(nestedBooking)
+            ? nestedBooking
             : payload;
 
-    if (!bookingData || typeof bookingData !== "object") {
+    if (Object.keys(bookingData).length === 0) {
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
                 "INVALID_BOOKING_PAYLOAD",
-                "Los datos de la reserva no son validos."
+                "Faltan los datos de la reserva."
             ),
             message
         );
@@ -280,13 +321,13 @@ async function handleBooking(message, reply, traceId) {
     try {
         const result = await withTimeout(
             processDualBooking(requestPayload),
-            UI?.FRONTEND_API_TIMEOUT_MS || 60000,
+            getTimeoutMs(),
             "processDualBooking"
         );
 
         const bookingResult = result || createResultError(
             "EMPTY_BOOKING_RESPONSE",
-            "No se recibio respuesta de la reserva."
+            "No se recibió respuesta de la reserva."
         );
 
         reply(MESSAGE_TYPES.BOOK, bookingResult, message);
@@ -306,15 +347,15 @@ async function handleBooking(message, reply, traceId) {
                     "[calendario-2] No se pudo abrir ConfirmacionReserva",
                     {
                         traceId,
-                        message: lightboxError?.message
+                        message: lightboxError && lightboxError.message
                     }
                 );
             }
         }
     } catch (error) {
         const timeout =
-            error?.code === "TIMEOUT" ||
-            String(error?.message || "")
+            error && error.code === "TIMEOUT" ||
+            String(error && error.message || "")
                 .toUpperCase()
                 .includes("TIMEOUT");
 
@@ -323,7 +364,7 @@ async function handleBooking(message, reply, traceId) {
             createResultError(
                 timeout ? "BOOKING_TIMEOUT" : "BOOKING_FAILED",
                 timeout
-                    ? "La reserva esta tardando demasiado. Intentalo de nuevo."
+                    ? "La reserva está tardando demasiado. Comprueba su estado antes de volver a intentarlo."
                     : "No se pudo completar la reserva."
             ),
             message
@@ -337,21 +378,27 @@ $w.onReady(async () => {
     const resolved = resolveServiceFromParams(params);
 
     if (!resolved) {
-        console.error("[calendario-2] Servicio no valido", { traceId });
+        console.error("[calendario-2] Servicio no válido", { traceId });
         return;
     }
 
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
 
-    const widget = $w("#htmlWidgetCalendario");
+    // ID confirmado por el usuario y el registro de Wix.
+    const widget = $w("#html1");
 
     if (
         !widget ||
         typeof widget.postMessage !== "function" ||
         typeof widget.onMessage !== "function"
     ) {
-        console.error("[calendario-2] Widget HTML no disponible", { traceId });
+        console.error("[calendario-2] Widget HTML no disponible", {
+            traceId,
+            widgetId: "#html1",
+            postMessage: typeof (widget && widget.postMessage),
+            onMessage: typeof (widget && widget.onMessage)
+        });
         return;
     }
 
@@ -364,7 +411,7 @@ $w.onReady(async () => {
                 const payload = getPayload(message);
 
                 if (type === MESSAGE_TYPES.NAV) {
-                    await handleNavigation(payload);
+                    handleNavigation(payload);
                     return;
                 }
 
@@ -396,24 +443,24 @@ $w.onReady(async () => {
 
             onError: (error) => {
                 console.error(
-                    "[calendario-2] Error de comunicacion",
+                    "[calendario-2] Error de comunicación",
                     {
                         traceId,
-                        message: error?.message
+                        message: error && error.message
                     }
                 );
             }
         });
 
         if (!bridge) {
-            throw new Error("No se pudo inicializar el bridge.");
+            throw new Error("No se pudo inicializar el puente.");
         }
     } catch (error) {
         console.error(
-            "[calendario-2] Error de inicializacion",
+            "[calendario-2] Error de inicialización",
             {
                 traceId,
-                message: error?.message
+                message: error && error.message
             }
         );
     }
