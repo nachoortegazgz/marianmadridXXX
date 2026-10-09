@@ -1,17 +1,51 @@
 /*
 =============================================================================
 MODULE: backend/booking/bookingUtils.js
-VERSION: v5009-FISCAL-V20.1
-BASE: v5008.3-FINAL + Directriz V20 (IDs nativa en ingles)
+VERSION: v5010.1-BOOKINGS-ALIGN
+BASE: v5009-FISCAL-V20.1 + Wix Bookings API alignment pass
 STANDARDS: G10 ASCII Strict
 
 RESPONSIBILITY: Helpers compartidos entre reservas, citas, bookingSaga y
                 bookingCore. Utilidades puras. Sin acceso a colecciones CMS.
 
-FIXES APLICADOS v5009-FISCAL-V20.1:
-  - V20-01: sin cambios funcionales. El modulo no importa constantes de
-            internalConfig.js ni accede a campos CMS. Cabecera actualizada
-            para trazabilidad.
+CONTRATOS WIX BOOKINGS REFERENCIADOS:
+  - Time Slots V2 (listAvailabilityTimeSlots / getAvailabilityTimeSlot):
+      Cada slot incluye availableResources con grupos por resourceTypeId.
+      getResourceIdsFromSlot extrae los GUIDs de staff de esos grupos.
+      Documentacion:
+        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
+        time-slots/time-slots-v2/list-availability-time-slots
+        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
+        time-slots/time-slots-v2/get-availability-time-slot
+  - Create Booking (bookings.createBooking):
+      bookedEntity.slot exige serviceId, scheduleId, startDate/endDate en
+      ISO UTC con Z, resource.id y location.locationType = OWNER_BUSINESS.
+      Los add-ons viajan en bookedAddOns a NIVEL RAIZ, no en el slot.
+      Documentacion:
+        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
+        bookings/bookings-writer-v2/create-booking
+  - Cancel Booking (bookings.cancelBooking):
+      revision es OBLIGATORIO para prevenir conflictos de concurrencia.
+      Documentacion:
+        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
+        bookings/bookings-writer-v2/cancel-booking
+  - Duration-range services: para servicios con availabilityConstraints.
+      durationRange, customerChoices NO esta soportado; la duracion se
+      deriva de localStartDate/localEndDate.
+
+FIXES APLICADOS v5010.1-BOOKINGS-ALIGN:
+  - BU-01: computeGapMinutes devuelve null para inputs invalidos, alineado
+          con mmUtils.computeGapMinutes. Antes devolvia 0, lo que ocultaba
+          errores (0 es un gap valido). Los consumidores deben tratar null
+          como error.
+  - BU-02: cleanGuidList usa getReferenceId de mmUtils para cubrir todas
+          las formas de referencia Wix (_id, id, referenceId, value,
+          arrays). Antes solo cubria resourceId, id, _id.
+  - BU-03: Header y JSDoc actualizados con referencias explicitas a la
+          documentacion oficial de Wix Bookings.
+
+FIXES APLICADOS v5009-FISCAL-V20.1 (heredados):
+  - V20-01: sin cambios funcionales.
 
 FIXES APLICADOS v5008.3 (heredados):
   - FIX-18: cleanGuid, cleanGuidList.
@@ -27,6 +61,7 @@ import {
     _looksLikeGuid,
     _normalizeLocalIsoStr,
     getUtcDateFromMadridLocal,
+    getReferenceId,
 } from "public/mmUtils";
 
 import { logger } from "backend/logger";
@@ -47,6 +82,20 @@ export function cleanGuid(value, errorCode = "INVALID_GUID") {
     return clean;
 }
 
+/**
+ * BU-02: lista de GUIDs validos desde multiples formas de referencia Wix.
+ * Formas admitidas: Array<GUID> | CSV | Array<objeto referencia>.
+ *
+ * Delega en getReferenceId de mmUtils, que cubre _id, id, referenceId,
+ * value y arrays anidados. Antes solo cubria resourceId, id, _id.
+ *
+ * AVISO DE IDENTIDAD (mmUtils):
+ *   ServiciosCatalogo.availableStaff es MULTI_REFERENCE a Members. Esta
+ *   funcion devuelve staffMemberId, NO resourceId. La resolucion
+ *   staffMemberId -> resourceId se ejecuta en backend/staff.js
+ *   (getStaffDisplayName, getStaffScheduleId). No enviar el resultado
+ *   directamente a resourceIds de Wix Bookings V2.
+ */
 export function cleanGuidList(value) {
     const source = Array.isArray(value)
         ? value
@@ -57,17 +106,8 @@ export function cleanGuidList(value) {
     return Array.from(
         new Set(
             source
-                .map((item) => {
-                    if (typeof item === "string") {
-                        return _safeTrim(item);
-                    }
-
-                    return _safeTrim(
-                        item?.resourceId ||
-                        item?.id ||
-                        item?._id
-                    );
-                })
+                .map((item) => getReferenceId(item))
+                .map((id) => _safeTrim(id))
                 .filter((id) => _looksLikeGuid(id))
         )
     );
@@ -75,32 +115,28 @@ export function cleanGuidList(value) {
 
 // =============================================================================
 // BLOQUE 1B - HELPERS CANONICOS DE SLOT Y PAIR TOKEN
-// (v5010.4 FASE 2: cero duplicado, cero ciclos de import)
 //
 // Unicas implementaciones de:
 //   - normalizacion de forma de slot (normalizeSlotShape)
 //   - extraccion de resourceIds de staff (getResourceIdsFromSlot)
-//   - huella canonica del par dual (_buildPairFingerprint) [CORE-05]
+//   - huella canonica del par dual (_buildPairFingerprint)
 //
 // Precedencia de modulo segun regla FASE 2:
 //   mmUtils > bookingUtils > core > web.
-// Por eso la huella vive AQUI (capa utilidades puras), no en bookingCore:
-// bookingCore ya depende de bookingUtils; definir la huella en bookingCore
-// obligaria a un import bookingUtils -> bookingCore (CICLO real). Todos los
-// consumidores (bookingCore, reservas.web, bookingSaga) importan de aqui o
-// reciben la reexportacion canonica de bookingCore.
 // =============================================================================
 
 /**
- * CORE-05 / SAGA-02 / PATCH-02: UNICA fuente de verdad de la huella del par
- * dual. Debe ser IDENTICA en los tres puntos donde se genera o consume un
+ * Huella canonica del par dual (CORE-05 / SAGA-02).
+ *
+ * Debe ser IDENTICA en los tres puntos donde se genera o consume un
  * pairToken:
  *   1. reservas.web._getCertifiedDualSlotsInternal (emisor en disponibilidad)
  *   2. bookingSaga._resolveUnifiedPairToken        (consumidor/reemisor)
  *   3. DualSlotCache.pairToken                     (persistencia)
- * Cualquier cambio en el orden o contenido de los campos rompe la correlacion
- * y la idempotencia. Los 8 campos son obligatorios por contrato (los
- * opcionales se serializan como cadena vacia).
+ *
+ * Los 8 campos son obligatorios por contrato (los opcionales se serializan
+ * como cadena vacia). Cualquier cambio en el orden o contenido de los campos
+ * rompe la correlacion y la idempotencia.
  */
 export function _buildPairFingerprint({
     serviceId,
@@ -140,6 +176,18 @@ export function normalizeSlotShape(slot) {
 /**
  * Extrae los resourceIds GUID del grupo de staff de un slot (formato plano o
  * envuelto), deduplicados. Fallback: resource directo / resourceId plano.
+ *
+ * Alineado con Time Slots V2 (availableResources):
+ *   https://dev.wix.com/docs/api-reference/business-solutions/bookings/
+ *   time-slots/time-slots-v2/list-availability-time-slots
+ *
+ * Cada grupo de availableResources tiene resourceTypeId y resources[].
+ * Wix devuelve variantes segun version de API:
+ *   group.resourceTypeId | group.resourceType.id | group.resourceType._id |
+ *   group.typeId
+ * Y cada resource puede venir como:
+ *   resource.id | resource._id | resource.resourceId
+ *
  * @param {object} slot slot crudo o normalizado
  * @param {string} staffResourceTypeId id del tipo de recurso STAFF (API.*)
  */
@@ -209,21 +257,31 @@ export function booleanValue(...values) {
 // BLOQUE 2 - GAP Y UTC RANGES
 // =============================================================================
 
+/**
+ * BU-01: gap entre fases en minutos.
+ *
+ * Devuelve null cuando los instantes no son validos. Un gap ilegible nunca
+ * debe degradarse a 0, porque 0 es un gap valido y ocultaria el error.
+ *
+ * Alineado con mmUtils.computeGapMinutes.
+ *
+ * @param {Date} f1EndUtc   fin de fase 1 en UTC
+ * @param {Date} f2StartUtc inicio de fase 2 en UTC
+ * @returns {number|null}   gap en minutos >= 0, o null si invalido
+ */
 export function computeGapMinutes(f1EndUtc, f2StartUtc) {
-    if (
-        !(f1EndUtc instanceof Date) ||
-        !(f2StartUtc instanceof Date)
-    ) {
-        return 0;
+    if (!(f1EndUtc instanceof Date) || !(f2StartUtc instanceof Date)) {
+        return null;
+    }
+
+    if (Number.isNaN(f1EndUtc.getTime()) || Number.isNaN(f2StartUtc.getTime())) {
+        return null;
     }
 
     const milliseconds =
         f2StartUtc.getTime() - f1EndUtc.getTime();
 
-    return Math.max(
-        0,
-        Math.round(milliseconds / 60000)
-    );
+    return Math.max(0, Math.round(milliseconds / 60000));
 }
 
 export function toUtcRange(startLocal, endLocal) {
@@ -250,6 +308,20 @@ export function toUtcRange(startLocal, endLocal) {
 // BLOQUE 3 - DURATION RANGE
 // =============================================================================
 
+/**
+ * Lee el durationRange del servicio.
+ *
+ * Alineado con la documentacion de Wix Bookings:
+ *   "For services configured with a duration range
+ *    (availabilityConstraints.durationRange), customerChoices is not
+ *    supported. The duration is derived from the localStartDate and
+ *    localEndDate specified in the request."
+ *
+ * Fuentes aceptadas (por orden): availabilityConstraints.durationRange,
+ * item.durationRange, item.data.durationRange, item.fields.durationRange.
+ *
+ * @returns {{min: number, max: number}|null} null si no hay rango valido.
+ */
 export function readDurationRange(item) {
     const constraints =
         item?.availabilityConstraints ||
@@ -295,6 +367,15 @@ export function readDurationRange(item) {
 // BLOQUE 4 - DURACION EFECTIVA
 // =============================================================================
 
+/**
+ * Duracion esperada del slot reservable.
+ *
+ * Para servicios duales (allowCombine), el slot reservable corresponde a la
+ * fase 1. Para servicios simples, se usa phase1Duration o totalDuration.
+ *
+ * @param {object} serviceConfig DTO de _mapServiceImport2ToUX.
+ * @returns {number} minutos esperados (0 si no hay config).
+ */
 export function resolveExpectedSlotMinutes(serviceConfig) {
     if (!serviceConfig) {
         return 0;
@@ -316,6 +397,16 @@ export function resolveExpectedSlotMinutes(serviceConfig) {
     );
 }
 
+/**
+ * Resuelve la duracion de la fase 2 de un servicio dual, siguiendo la
+ * cadena de linkedPhases con deteccion de ciclos.
+ *
+ * @param {string} linkedServiceId GUID del servicio enlazado.
+ * @param {string} traceId         Trazabilidad.
+ * @param {Set}    visited         Set de IDs visitados (deteccion de ciclos).
+ * @param {function} resolver      Funcion async que devuelve {status, data}.
+ * @returns {Promise<number>}      Minutos de fase 2, o 0 si invalido/ciclo.
+ */
 export async function resolveLinkedPhase2Duration(
     linkedServiceId,
     traceId,
@@ -367,6 +458,18 @@ export async function resolveLinkedPhase2Duration(
 // BLOQUE 5 - VALIDACION DE DURACION DE SLOT
 // =============================================================================
 
+/**
+ * Valida que la duracion real de un slot coincida con la configuracion del
+ * servicio (rango o duracion exacta).
+ *
+ * @param {object} params
+ * @param {object} params.serviceConfig DTO del servicio.
+ * @param {string} params.startLocal    inicio local (ISO sin Z).
+ * @param {string} params.endLocal      fin local (ISO sin Z).
+ * @returns {{ok: boolean, code: string|null, actualMinutes: number,
+ *            expectedMinutes: number|null, min: number|null,
+ *            max: number|null}}
+ */
 export function validateSlotDuration({
     serviceConfig,
     startLocal,
@@ -442,7 +545,7 @@ export function validateSlotDuration({
 }
 
 // =============================================================================
-// BLOQUE 6 - [FIX-R2] BALANCEO DE CARGA DE STAFF
+// BLOQUE 6 - BALANCEO DE CARGA DE STAFF (FIX-R2)
 //
 // Elige el recurso con menor carga del mapa loadByResource. En empates,
 // orden alfabetico determinista. Si el mapa esta vacio, primer alfabetico.
