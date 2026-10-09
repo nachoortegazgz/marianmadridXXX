@@ -1,12 +1,25 @@
 /*
  * ============================================================================
  * FILE: backend/reservas.web.js
- * VERSION: v5010-DAL-MIGRATION
- * BASE: v5009-FISCAL-V20.1 + migracion DAL dataAccess.js (orden 8/9)
+ * VERSION: v5010.1-DAL-MIGRATION + DIAGNOSTICS
+ * BASE: v5010-DAL-MIGRATION + FIX-DTO-STAFF + FIX-DIAG-DAYS
  * RESPONSIBILITY: Availability engine, dual slots, staff pairing and caching.
  * STANDARDS: G10 ASCII Strict.
  *
- * FIXES APLICADOS v5010-DAL-MIGRATION:
+ * FIXES APLICADOS v5010.1-DAL-MIGRATION + DIAGNOSTICS:
+ *  - FIX-DTO-STAFF-01: staffOptions ahora incluye resourceId explicito.
+ *            El HTML espera person.resourceId y person.name. Solo se aplica
+ *            si availableStaff contiene GUIDs de recurso de Wix Bookings.
+ *  - FIX-DIAG-DAYS-01: catch de getAvailableDays eleva a log.error y anade
+ *            contexto tecnico (errorName, errorCode, details, stack) al log
+ *            sin exponer datos personales. El mensaje publico sigue generico
+ *            y ahora incluye traceId para correlacion.
+ *  - FIX-DIAG-DAYS-02: logs informativos en getAvailableDays para distinguir
+ *            entre "Bookings respondio 0 timeSlots" (config/disponibilidad)
+ *            y "Bookings lanzo excepcion" (payload/SDK). TEMPORALES: retirar
+ *            o bajar a log.debug tras diagnostico.
+ *
+ * FIXES APLICADOS v5010-DAL-MIGRATION (heredados):
  *  - DAL-01: import nominal de backend/dataAccess (queryFirstItem, queryItems,
  *            CONSISTENCY). dataAccess.js NO tiene export default: el import
  *            legacy 'import wixData from ...' resolvia a undefined y rompia
@@ -525,10 +538,14 @@ export async function _mapServiceImport2ToUX(service, traceId) {
 
     const availableStaff = cleanGuidList(_readServiceField(service, "availableStaff"));
 
+    // FIX-DTO-STAFF-01: el HTML espera person.resourceId y person.name.
+    // Se anade resourceId explicito al DTO. Solo valido si availableStaff
+    // contiene GUIDs de recurso de Wix Bookings (ver contrato BIBLIA).
     const staffOptions = await Promise.all(
         availableStaff.map(async (resourceId) => {
             const displayName = await _getStaffDisplayNamePublic(resourceId);
             return {
+                resourceId,
                 id: resourceId,
                 value: resourceId,
                 name: displayName,
@@ -945,6 +962,21 @@ export const getAvailableDays = webMethod(
                 300
             );
 
+            // FIX-DIAG-DAYS-02A: diagnostico de respuesta de Bookings.
+            // TEMPORAL: retirar o bajar a log.debug tras diagnostico.
+            // Distingue entre "Bookings respondio 0 timeSlots" (config/
+            // disponibilidad) y "Bookings lanzo excepcion" (payload/SDK).
+            log.info("getAvailableDays availability response", {
+                traceId,
+                serviceId,
+                year: y,
+                month: m,
+                timeSlotCount: Array.isArray(result && result.timeSlots)
+                    ? result.timeSlots.length
+                    : null,
+                hasTimeSlotsArray: Array.isArray(result && result.timeSlots)
+            });
+
             const timeSlots = Array.isArray(result?.timeSlots) ? result.timeSlots : [];
             const daySet = new Set();
 
@@ -956,6 +988,13 @@ export const getAvailableDays = webMethod(
                 if (!localStart) continue;
                 daySet.add(localStart.slice(0, 10));
             }
+
+            // FIX-DIAG-DAYS-02B: diagnostico de dias calculados.
+            // TEMPORAL: retirar o bajar a log.debug tras diagnostico.
+            log.info("getAvailableDays days computed", {
+                traceId,
+                dayCount: daySet.size
+            });
 
             return {
                 status: "SUCCESS",
@@ -969,13 +1008,29 @@ export const getAvailableDays = webMethod(
                 error: null
             };
         } catch (error) {
-            log.warn("getAvailableDays failed", { traceId, message: error?.message });
+            // FIX-DIAG-DAYS-01: eleva a log.error y anade contexto tecnico.
+            // El mensaje publico sigue generico; traceId permite correlacion
+            // con Wix Logs sin exponer detalles internos.
+            log.error("getAvailableDays failed", {
+                traceId,
+                serviceKey: _safeTrim(serviceIdOrSlug),
+                resourceId: _safeTrim(resourceId) || null,
+                year: Number(year),
+                month: Number(month),
+                errorName: error && error.name,
+                errorCode: error && error.code,
+                message: error && error.message,
+                details: error && error.details,
+                stack: error && error.stack
+            });
+
             return {
                 status: "ERROR",
                 data: null,
                 error: {
                     code: "AVAILABLE_DAYS_FAILED",
-                    message: "Could not load available days."
+                    message: "Could not load available days.",
+                    traceId
                 }
             };
         }
