@@ -1,7 +1,7 @@
 /*
 =============================================================================
 MODULE: public/widgetBridge.js
-VERSION: v5011-F1-CANONICAL-ALIGNED
+VERSION: v5011-F2-CALLBACK-ALIGNED
 PURPOSE: Secure, versioned bridge between Wix Velo and HTML Components.
 ASCII: Strict ASCII in source comments and identifiers.
 =============================================================================
@@ -44,7 +44,12 @@ const DEFAULT_ALLOWED_ORIGIN_SUFFIXES = Object.freeze([
     ".wixsite.com",
     ".editorx.com"
 ]);
-const OPAQUE_ORIGIN_PREFIXES = Object.freeze(["blob:", "data:", "filesystem:"]);
+
+const OPAQUE_ORIGIN_PREFIXES = Object.freeze([
+    "blob:",
+    "data:",
+    "filesystem:"
+]);
 
 export const WIDGET_ERROR_CODE = Object.freeze({
     INVALID_WIDGET: "WIDGET_INVALID_HTML_COMPONENT",
@@ -65,16 +70,25 @@ export const WIDGET_ERROR_CODE = Object.freeze({
     CONSUMER_ERROR_HANDLER_FAILED: "WIDGET_ERROR_HANDLER_FAILED"
 });
 
-const DEFAULT_ALLOWED_TYPES = Object.freeze(Object.values(MESSAGE_TYPES));
-const textEncoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
+const DEFAULT_ALLOWED_TYPES = Object.freeze(
+    Object.values(MESSAGE_TYPES)
+);
+const textEncoder =
+    typeof TextEncoder === "function" ? new TextEncoder() : null;
+
 let instanceCounter = 0;
 
 function safeObject(value) {
-    return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+    return value && typeof value === "object" && !Array.isArray(value)
+        ? value
+        : {};
 }
 
 function safeType(value) {
-    return String(value ?? "").trim().toUpperCase().slice(0, MAX_TYPE_LENGTH);
+    return String(value ?? "")
+        .trim()
+        .toUpperCase()
+        .slice(0, MAX_TYPE_LENGTH);
 }
 
 function safeMessageId(value) {
@@ -85,7 +99,10 @@ function safeMessageId(value) {
 }
 
 function toProtocolVersion(value) {
-    if (value === undefined || value === null || value === "") return PROTOCOL_VERSION;
+    if (value === undefined || value === null || value === "") {
+        return PROTOCOL_VERSION;
+    }
+
     const parsed = Number(value);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
@@ -93,8 +110,12 @@ function toProtocolVersion(value) {
 function estimateBytes(value) {
     try {
         const serialized = JSON.stringify(value);
-        if (typeof serialized !== "string") return MAX_MESSAGE_BYTES + 1;
-        return textEncoder ? textEncoder.encode(serialized).length : serialized.length;
+        if (typeof serialized !== "string") {
+            return MAX_MESSAGE_BYTES + 1;
+        }
+        return textEncoder
+            ? textEncoder.encode(serialized).length
+            : serialized.length;
     } catch (_) {
         return MAX_MESSAGE_BYTES + 1;
     }
@@ -102,18 +123,25 @@ function estimateBytes(value) {
 
 function countKeys(value) {
     if (!value || typeof value !== "object") return 0;
+
     let total = 0;
     const stack = [value];
+
     while (stack.length > 0 && total <= MAX_PAYLOAD_KEYS) {
         const current = stack.pop();
         if (!current || typeof current !== "object") continue;
+
         const keys = Object.keys(current);
         total += keys.length;
+
         for (const key of keys) {
             const child = current[key];
-            if (child && typeof child === "object") stack.push(child);
+            if (child && typeof child === "object") {
+                stack.push(child);
+            }
         }
     }
+
     return total;
 }
 
@@ -126,39 +154,66 @@ function isResponseType(type) {
 }
 
 function getResponseTypeBase(type) {
-    return isResponseType(type) ? type.slice(0, -RESPONSE_TYPE_SUFFIX.length) : "";
+    return isResponseType(type)
+        ? type.slice(0, -RESPONSE_TYPE_SUFFIX.length)
+        : "";
+}
+
+function normalizeOriginSuffix(value) {
+    const suffix = String(value ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/^\.+/, "");
+
+    return suffix ? `.${suffix}` : "";
 }
 
 function resolveOriginPolicy(options) {
-    const exact = String(options.allowedOrigin ?? "").trim().toLowerCase();
+    const exact = String(options.allowedOrigin ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/\/$/, "");
+
     if (exact) {
         return Object.freeze({
             mode: "exact",
             exact,
             suffixes: Object.freeze([]),
-            allowOpaqueOrigin: options.allowOpaqueOrigin !== false
+            allowOpaqueOrigin: options.allowOpaqueOrigin === true
         });
     }
 
-    const custom = Array.isArray(options.allowedOriginSuffixes) ?
-        options.allowedOriginSuffixes
-        .map((suffix) => String(suffix ?? "").trim().toLowerCase())
-        .filter(Boolean) :
-        [];
+    const custom = Array.isArray(options.allowedOriginSuffixes)
+        ? options.allowedOriginSuffixes
+            .map(normalizeOriginSuffix)
+            .filter(Boolean)
+        : [];
 
     return Object.freeze({
         mode: options.strictOrigin === false ? "off" : "suffix",
         exact: "",
-        suffixes: Object.freeze(custom.length > 0 ? custom : DEFAULT_ALLOWED_ORIGIN_SUFFIXES),
-        allowOpaqueOrigin: options.allowOpaqueOrigin !== false
+        suffixes: Object.freeze(
+            custom.length > 0
+                ? custom
+                : DEFAULT_ALLOWED_ORIGIN_SUFFIXES
+        ),
+        allowOpaqueOrigin: options.allowOpaqueOrigin === true
     });
 }
 
 function classifyOrigin(rawOrigin) {
-    const origin = String(rawOrigin ?? "").trim().toLowerCase();
-    if (!origin || origin === "null") return { opaque: true, value: origin };
+    const origin = String(rawOrigin ?? "")
+        .trim()
+        .toLowerCase();
+
+    if (!origin || origin === "null") {
+        return { opaque: true, value: origin };
+    }
+
     return {
-        opaque: OPAQUE_ORIGIN_PREFIXES.some((prefix) => origin.startsWith(prefix)),
+        opaque: OPAQUE_ORIGIN_PREFIXES.some((prefix) =>
+            origin.startsWith(prefix)
+        ),
         value: origin
     };
 }
@@ -167,17 +222,22 @@ function getOriginHost(origin) {
     try {
         return new URL(origin).hostname.toLowerCase();
     } catch (_) {
-        return origin.replace(/^[a-z0-9+.-]+:\/\//i, "").split("/")[0].toLowerCase();
+        return origin
+            .replace(/^[a-z0-9+.-]+:\/\//i, "")
+            .split("/")[0]
+            .toLowerCase();
     }
 }
 
 function isOriginAllowed(origin, policy) {
     if (policy.mode === "off") return true;
     if (policy.mode === "exact") return origin === policy.exact;
+
     const host = getOriginHost(origin);
+
     return policy.suffixes.some((suffix) => {
-        const normalizedSuffix = suffix.replace(/^\./, "");
-        return host === normalizedSuffix || host.endsWith(suffix);
+        const baseHost = suffix.slice(1);
+        return host === baseHost || host.endsWith(suffix);
     });
 }
 
@@ -188,12 +248,14 @@ function withManagedTimeout(promise, timeoutMs, code, timers) {
             if (settled) return;
             settled = true;
             timers.delete(timer);
+
             const error = new Error(code);
             error.code = code;
             reject(error);
         }, Math.max(1, Number(timeoutMs) || 1));
 
         timers.add(timer);
+
         Promise.resolve(promise).then(
             (value) => {
                 if (settled) return;
@@ -226,26 +288,35 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     const settings = safeObject(options);
     instanceCounter += 1;
-    const bridgeId = `wbridge-${instanceCounter.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const bridgeId =
+        `wbridge-${instanceCounter.toString(36)}-` +
+        Math.random().toString(36).slice(2, 8);
     const originPolicy = resolveOriginPolicy(settings);
     const allowedTypes = new Set(
-        Array.isArray(settings.allowedTypes) && settings.allowedTypes.length > 0 ?
-        settings.allowedTypes.map(safeType).filter(Boolean) :
-        DEFAULT_ALLOWED_TYPES
+        Array.isArray(settings.allowedTypes) &&
+        settings.allowedTypes.length > 0
+            ? settings.allowedTypes.map(safeType).filter(Boolean)
+            : DEFAULT_ALLOWED_TYPES
     );
-    const handshakeTimeoutMs = Number(settings.handshakeTimeoutMs) > 0 ?
-        Number(settings.handshakeTimeoutMs) :
-        PROTOCOL_UI.HANDSHAKE_TIMEOUT_MS;
-    const contextTimeoutMs = Number(settings.contextTimeoutMs) > 0 ?
-        Number(settings.contextTimeoutMs) :
-        PROTOCOL_UI.CONTEXT_TIMEOUT_MS;
-    const onWidgetMessage = typeof settings.onWidgetMessage === "function" ?
-        settings.onWidgetMessage :
-        null;
-    const onContextReady = typeof settings.onContextReady === "function" ?
-        settings.onContextReady :
-        null;
-    const onError = typeof settings.onError === "function" ? settings.onError : () => {};
+    const handshakeTimeoutMs = Number(settings.handshakeTimeoutMs) > 0
+        ? Number(settings.handshakeTimeoutMs)
+        : PROTOCOL_UI.HANDSHAKE_TIMEOUT_MS;
+    const contextTimeoutMs = Number(settings.contextTimeoutMs) > 0
+        ? Number(settings.contextTimeoutMs)
+        : PROTOCOL_UI.CONTEXT_TIMEOUT_MS;
+    const onWidgetMessage =
+        typeof settings.onWidgetMessage === "function"
+            ? settings.onWidgetMessage
+            : null;
+    const onContextReady =
+        typeof settings.onContextReady === "function"
+            ? settings.onContextReady
+            : null;
+    const onError =
+        typeof settings.onError === "function"
+            ? settings.onError
+            : () => {};
 
     let destroyed = false;
     let sequence = 0;
@@ -253,11 +324,15 @@ export function createWidgetBridge(widgetElement, options = {}) {
     let contextInFlight = false;
     let bridge = null;
     let handshakeTimer = null;
+
     const listeners = new Set();
     const timers = new Set();
 
     function isAllowedType(type) {
-        if (allowedTypes.has(type) || type === ADMIN_RESPONSE_TYPE) return true;
+        if (allowedTypes.has(type) || type === ADMIN_RESPONSE_TYPE) {
+            return true;
+        }
+
         const base = getResponseTypeBase(type);
         return Boolean(base) && allowedTypes.has(base);
     }
@@ -267,12 +342,16 @@ export function createWidgetBridge(widgetElement, options = {}) {
         error.code = code;
         error.bridgeId = bridgeId;
         if (cause) error.cause = cause;
-        if (detail !== null && detail !== undefined) error.detail = detail;
+        if (detail !== null && detail !== undefined) {
+            error.detail = detail;
+        }
+
         try {
             onError(error, detail);
         } catch (_) {
             // Error reporting must not break message delivery.
         }
+
         return error;
     }
 
@@ -284,39 +363,64 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     function extractEvent(event) {
         const classified = classifyOrigin(event?.origin);
+
         if (classified.opaque) {
             if (!originPolicy.allowOpaqueOrigin) {
-                reportError(WIDGET_ERROR_CODE.ORIGIN_OPAQUE_REJECTED, { origin: classified.value });
+                reportError(
+                    WIDGET_ERROR_CODE.ORIGIN_OPAQUE_REJECTED,
+                    { origin: classified.value }
+                );
                 return null;
             }
         } else if (!isOriginAllowed(classified.value, originPolicy)) {
-            reportError(WIDGET_ERROR_CODE.ORIGIN_REJECTED, { origin: classified.value });
+            reportError(
+                WIDGET_ERROR_CODE.ORIGIN_REJECTED,
+                { origin: classified.value }
+            );
             return null;
         }
 
         const message = safeObject(event?.data);
+
         if (estimateBytes(message) > MAX_MESSAGE_BYTES) {
             reportError(WIDGET_ERROR_CODE.MESSAGE_TOO_LARGE);
             return null;
         }
+
         if (countKeys(message) > MAX_PAYLOAD_KEYS) {
             reportError(WIDGET_ERROR_CODE.PAYLOAD_TOO_COMPLEX);
             return null;
         }
+
         return message;
     }
 
     function normalizeMessage(source) {
         const type = safeType(source.type);
-        if (!type) return { message: null, code: WIDGET_ERROR_CODE.TYPE_MISSING };
-        if (!isAllowedType(type)) return { message: null, code: WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED };
+        if (!type) {
+            return {
+                message: null,
+                code: WIDGET_ERROR_CODE.TYPE_MISSING
+            };
+        }
+
+        if (!isAllowedType(type)) {
+            return {
+                message: null,
+                code: WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED
+            };
+        }
 
         const version = toProtocolVersion(source.version);
         if (version !== PROTOCOL_VERSION) {
-            return { message: null, code: WIDGET_ERROR_CODE.VERSION_UNSUPPORTED };
+            return {
+                message: null,
+                code: WIDGET_ERROR_CODE.VERSION_UNSUPPORTED
+            };
         }
 
         const messageId = safeMessageId(source.messageId);
+
         return {
             message: Object.freeze({
                 type,
@@ -335,14 +439,20 @@ export function createWidgetBridge(widgetElement, options = {}) {
             try {
                 listener(message, bridge);
             } catch (error) {
-                reportError(WIDGET_ERROR_CODE.LISTENER_FAILED, null, error);
+                reportError(
+                    WIDGET_ERROR_CODE.LISTENER_FAILED,
+                    null,
+                    error
+                );
             }
         });
     }
 
     function nextMessageId() {
         sequence += 1;
-        return safeMessageId(`${bridgeId}-${Date.now().toString(36)}-${sequence.toString(36)}`);
+        return safeMessageId(
+            `${bridgeId}-${Date.now().toString(36)}-${sequence.toString(36)}`
+        );
     }
 
     function send(type, payload = {}, messageId = null) {
@@ -379,13 +489,21 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     function resolveCorrelationId(requestMessage) {
         if (!requestMessage) return "";
-        if (typeof requestMessage === "string") return safeMessageId(requestMessage);
+        if (typeof requestMessage === "string") {
+            return safeMessageId(requestMessage);
+        }
         if (typeof requestMessage !== "object") return "";
-        return safeMessageId(requestMessage.messageId) || safeMessageId(requestMessage.requestId);
+
+        return safeMessageId(requestMessage.messageId) ||
+            safeMessageId(requestMessage.requestId);
     }
 
     function reply(type, payload = {}, requestMessage = null) {
-        return send(type, payload, resolveCorrelationId(requestMessage) || null);
+        return send(
+            type,
+            payload,
+            resolveCorrelationId(requestMessage) || null
+        );
     }
 
     function postMessage(payload = {}, type = MESSAGE_TYPES.CONTEXT) {
@@ -393,28 +511,41 @@ export function createWidgetBridge(widgetElement, options = {}) {
     }
 
     function subscribe(callback) {
-        if (destroyed || typeof callback !== "function") return () => {};
+        if (destroyed || typeof callback !== "function") {
+            return () => {};
+        }
         listeners.add(callback);
         return () => listeners.delete(callback);
     }
 
     async function publishContext(message) {
         if (!onContextReady || contextInFlight || destroyed) return;
-        contextInFlight = true;
 
+        contextInFlight = true;
         try {
             const context = await withManagedTimeout(
-                Promise.resolve().then(() => onContextReady(message, bridge)),
+                Promise.resolve().then(() =>
+                    onContextReady(message, bridge)
+                ),
                 contextTimeoutMs,
                 WIDGET_ERROR_CODE.CONTEXT_TIMEOUT,
                 timers
             );
-            if (destroyed || context === undefined || context === null) return;
-            send(MESSAGE_TYPES.CONTEXT, context, message.messageId || null);
+
+            if (destroyed || context === undefined || context === null) {
+                return;
+            }
+
+            send(
+                MESSAGE_TYPES.CONTEXT,
+                context,
+                message.messageId || null
+            );
         } catch (cause) {
-            const code = cause?.code === WIDGET_ERROR_CODE.CONTEXT_TIMEOUT ?
-                WIDGET_ERROR_CODE.CONTEXT_TIMEOUT :
-                WIDGET_ERROR_CODE.CONTEXT_FAILED;
+            const code =
+                cause?.code === WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
+                    ? WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
+                    : WIDGET_ERROR_CODE.CONTEXT_FAILED;
             const detail = {
                 causeCode: cause?.code || null,
                 causeMessage: cause?.message || String(cause),
@@ -428,31 +559,41 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     function armHandshakeWatchdog() {
         if (!onContextReady || handshakeTimeoutMs <= 0) return;
+
         handshakeTimer = setTimeout(() => {
             timers.delete(handshakeTimer);
             handshakeTimer = null;
             if (destroyed || handshakeCompleted) return;
-            reportError(WIDGET_ERROR_CODE.HANDSHAKE_TIMEOUT, { bridgeId });
+            reportError(
+                WIDGET_ERROR_CODE.HANDSHAKE_TIMEOUT,
+                { bridgeId }
+            );
         }, handshakeTimeoutMs);
+
         timers.add(handshakeTimer);
     }
 
     const unsubscribeWidget = widgetElement.onMessage((event) => {
         if (destroyed) return;
+
         try {
             const extracted = extractEvent(event);
             if (!extracted) return;
 
             const normalized = normalizeMessage(extracted);
             if (!normalized.message) {
-                reportError(normalized.code || WIDGET_ERROR_CODE.MESSAGE_REJECTED, {
-                    receivedType: extracted.type ?? null,
-                    receivedVersion: extracted.version ?? null
-                });
+                reportError(
+                    normalized.code || WIDGET_ERROR_CODE.MESSAGE_REJECTED,
+                    {
+                        receivedType: extracted.type ?? null,
+                        receivedVersion: extracted.version ?? null
+                    }
+                );
                 return;
             }
 
             const message = normalized.message;
+
             if (message.type === MESSAGE_TYPES.READY) {
                 handshakeCompleted = true;
                 if (handshakeTimer !== null) {
@@ -465,10 +606,38 @@ export function createWidgetBridge(widgetElement, options = {}) {
             notifyListeners(message);
 
             if (onWidgetMessage) {
+                // The second argument is a callable reply helper for existing
+                // page handlers. The third argument exposes the full bridge.
+                // Replies stay correlated with the original incoming message.
+                const replyToMessage = (
+                    responseType,
+                    payload = {},
+                    requestMessage = message
+                ) => {
+                    const candidate =
+                        requestMessage &&
+                        typeof requestMessage === "object" &&
+                        (requestMessage.messageId || requestMessage.requestId)
+                            ? requestMessage
+                            : message;
+
+                    return reply(responseType, payload, candidate);
+                };
+
                 Promise.resolve()
-                    .then(() => onWidgetMessage(message, bridge))
+                    .then(() =>
+                        onWidgetMessage(
+                            message,
+                            replyToMessage,
+                            bridge
+                        )
+                    )
                     .catch((error) => {
-                        reportError(error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED, null, error);
+                        reportError(
+                            error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED,
+                            null,
+                            error
+                        );
                     });
             }
 
@@ -476,7 +645,11 @@ export function createWidgetBridge(widgetElement, options = {}) {
                 void publishContext(message);
             }
         } catch (error) {
-            reportError(error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED, null, error);
+            reportError(
+                error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED,
+                null,
+                error
+            );
         }
     });
 
@@ -504,6 +677,7 @@ export function createWidgetBridge(widgetElement, options = {}) {
             destroyed = true;
             listeners.clear();
             clearAllTimers();
+
             if (typeof unsubscribeWidget === "function") {
                 try {
                     unsubscribeWidget();
