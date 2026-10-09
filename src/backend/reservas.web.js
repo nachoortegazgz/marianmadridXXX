@@ -1515,4 +1515,3 @@ export async function revalidateExactAvailabilitySlot({
         };
     }
 }
-```
