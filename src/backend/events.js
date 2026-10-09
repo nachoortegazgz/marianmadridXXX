@@ -24,7 +24,7 @@ FIXES APLICADOS v5009-FISCAL (heredados):
 =============================================================================
 */
 
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { createClient } from "@wix/sdk";
 import { secrets } from "@wix/secrets";
 

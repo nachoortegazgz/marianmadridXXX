@@ -60,11 +60,11 @@ import { bookings } from "@wix/bookings";
 // "@wix/ecom" (cero legacy). Firmas equivalentes:
 // checkout.createCheckout(request) y checkout.getCheckoutUrl(id, opts).
 import { checkout } from "@wix/ecom";
-import { elevate } from "@wix/sdk";
+import { auth } from "@wix/essentials";
 // EXCEPCION DATA API (APENDICE C de la BIBLIA): lectura/escritura CMS
 // server-side via wixData con suppressAuth; ver apendice para el porque
 // no se migra a datasets.query('@wix/data').queryDataItems().
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
 import {
@@ -159,9 +159,9 @@ export const ERROR_CODES = Object.freeze({
 // (bookingSaga._createBookingWithSelectiveElevation, FIX-37), que solo
 // eleva bajo ACCESS_DENIED; el reprogramado no tiene flujo activo.
 
-export const cancelBookingElevated = elevate(bookings.cancelBooking);
-export const createCheckoutElevated = elevate(checkout.createCheckout);
-export const getCheckoutUrlElevated = elevate(checkout.getCheckoutUrl);
+export const cancelBookingElevated = auth.elevate(bookings.cancelBooking);
+export const createCheckoutElevated = auth.elevate(checkout.createCheckout);
+export const getCheckoutUrlElevated = auth.elevate(checkout.getCheckoutUrl);
 
 // CORE-06: Mapa paymentStatus SSOT espanol -> enum nativo Wix (BIBLIA 3.2.1).
 // Los valores nativos ingleses NO aparecen como clave: pasan sin traduccion,
@@ -191,7 +191,7 @@ function _toWixNativePaymentStatus(value) {
     return WIX_NATIVE_PAYMENT_STATUS[v] || value;
 }
 
-const _confirmOrDeclineElevatedRaw = elevate(bookings.confirmOrDeclineBooking);
+const _confirmOrDeclineElevatedRaw = auth.elevate(bookings.confirmOrDeclineBooking);
 
 /**
  * CORE-06: Wrapper elevado que traduce el paymentStatus del SSOT (espanol)

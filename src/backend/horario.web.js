@@ -9,7 +9,7 @@ CORRECTIONS: C-01 (sin active), C-03/C-04 (memberId), BUG-04 FIX (campos
 =============================================================================
 */
 
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { webMethod, Permissions } from "wix-web-module";
 import { members } from "@wix/members";
 

@@ -21,7 +21,7 @@ CORRECTIONS (heredadas): CRON-01..CRON-06.
 =============================================================================
 */
 
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import {
     BUSINESS_COLLECTIONS,
     OPERATIONAL_COLLECTIONS,

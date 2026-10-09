@@ -8,7 +8,7 @@ STANDARDS: G10 ASCII Strict.
 */
 
 import { webMethod, Permissions } from "wix-web-module";
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { secrets } from "@wix/secrets";
 
 import {

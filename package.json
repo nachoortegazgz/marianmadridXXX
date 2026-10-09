@@ -20,7 +20,8 @@
     "@wix/secrets": "1.0.75",
     "@wix/site-window": "1.59.0",
     "@wix/essentials": "1.0.15",
-    "@wix/members": "1.0.519"
+    "@wix/members": "1.0.519",
+    "@wix/sdk": "^1.0.0"
   },
   "scripts": {
     "postinstall": "wix sync-types",

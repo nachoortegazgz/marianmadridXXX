@@ -17,7 +17,7 @@ CORRECTIONS APPLIED (ANEXO v8.1):
 =============================================================================
 */
 
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { members } from "@wix/members";
 
 import {

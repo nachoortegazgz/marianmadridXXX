@@ -26,7 +26,7 @@ FIXES APLICADOS v5009-FISCAL-V20.1:
 */
 
 import { webMethod, Permissions } from "wix-web-module";
-import wixData from "backend/dataAccess";
+import wixData from "backend/dataLegacyAdapter";
 import { members } from "@wix/members";
 
 import { makeTraceId } from "public/mmUtils";
