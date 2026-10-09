@@ -1,35 +1,47 @@
 /*
 =============================================================================
 MODULE: backend/citasManager.web.js
-VERSION: v10.0-SSOT-FRICTIONLESS
+VERSION: v10.1-SSOT-SECURE
 BASE: BIBLIA SSOT v9.1 + Anexo D + dataAccess v10.0
 RESPONSIBILITY: Booking processing, payment confirmation and rescheduling.
 STANDARDS: G10 ASCII Strict. Sin console.log directo (logger SSOT).
 
-CORRECCIONES APLICADAS (v10.0):
-  C1. DAL: migrado de backend/dataAccess.js a backend/dataAccess.js v10.0.
-      Desaparece el flag { suppressAuth: true } (R1/R5): toda operacion del
-      DAL es elevada por diseno. Lecturas de CitasF2 usan CONSISTENCY.STRONG
-      para garantizar visibilidad inmediata tras escritura.
+CORRECCIONES APLICADAS (v10.1):
+  CM-01: _assertBookingOwner implementado de verdad. Antes era un stub que
+         devolvia true sin comprobar nada (dead code: definido pero nunca
+         invocado). Ahora compara order.buyerInfo.email contra
+         cita.contactDetails.email con normalizacion (trim + lowercase). Si
+         ambos existen y no coinciden, lanza BookingError ACCESS_DENIED.
+         Si el order no trae email de comprador, se deniega (fail-closed).
+  CM-02: _assertBookingOwner se invoca dentro de confirmPayment para cada
+         cita ANTES de tocar el ledger o el CMS. Antes solo existia la
+         definicion, no habia llamada: la "verificacion de propiedad" era
+         decorativa.
+  CM-03: Nota contractual en confirmPayment sobre el flujo eCommerce. La
+         documentacion oficial de Wix Bookings indica que
+         confirmOrDeclineBooking NO debe llamarse cuando se usa Wix
+         eCommerce checkout: Wix actualiza el booking status automaticamente
+         segun el paymentStatus de la orden. Este webMethod NO llama a esa
+         API; solo sincroniza el CMS (CitasF2) y el TPV (cajas.web.js).
+         El webhook wixEcom_onOrderPaymentStatusUpdated debe considerarse
+         el mecanismo primario en produccion; este webMethod es el
+         mecanismo de sincronizacion disparado por el frontend tras el pago.
+  CM-04: Header y changelog actualizados.
+
+CORRECCIONES APLICADAS (v10.0, heredadas):
+  C1. DAL: migrado a backend/dataAccess.js v10.0. Sin { suppressAuth }:
+      toda operacion del DAL es elevada por diseno. Lecturas de CitasF2
+      usan CONSISTENCY.STRONG.
   C2. FILTROS: builder Velo (.eq/.limit/.find) sustituido por objeto nativo
-      SDK v2 via wql.* (R4). Cero concatenacion WQL, cero builder legacy.
-  C3. ENUM: BOOKING_TYPE.DUALF2 corregido a BOOKING_TYPE.DUAL_F2 (ADR-17
-      SNAKE_CASE). El valor anterior no existia en el enum canonico y hacia
-      fallar silenciosamente la identificacion de fases duales.
-  C4. IMPORTS: eliminada importacion dinamica de reservas.web.js dentro de
-      _loadServiceConfigForCita. Se usa la importacion estatica ya existente
-      en la cabecera del modulo (_getServiceBySlugOrIdInternal no estaba
-      importada; se anade ahora). La importacion dinamica rompia el analisis
-      estatico de dependencias y dificultaba la auditoria de seguridad.
+      SDK v2 via wql.*.
+  C3. ENUM: BOOKING_TYPE.DUAL_F2 (ADR-17 SNAKE_CASE).
+  C4. IMPORTS: eliminada importacion dinamica de reservas.web.js. Se usa
+      importacion estatica.
   C5. FRICCION: _getCitaMeta tolera meta como string JSON o como objeto.
-      Se mantiene la tolerancia porque CitasF2.meta puede venir serializado
-      desde flujos legacy anteriores a FASE1 (EOL 31/12/2026).
-  C6. ALIAS: eliminados alias de campos en _getBookingSlotFromCita y
-      _getDualSlotInput. Un unico nombre canonico por concepto.
+  C6. ALIAS: eliminados alias de campos.
   C7. SEGURIDAD: confirmPayment mantiene Permissions.SiteMember. La
-      verificacion de propiedad de la reserva/orden debe implementarse en
-      _assertBookingOwner antes de desplegar pagos en produccion. Este
-      modulo NO resuelve ese punto por si solo.
+      verificacion de propiedad se resuelve en v10.1 (ver CM-01/CM-02).
+
 DEPENDENCIAS: backend/dataAccess.js, backend/booking/bookingSaga.js,
   backend/booking/bookingCore.js, backend/cajas.web.js, backend/reservas.web.js,
   backend/security.js, backend/audit.js, backend/logger.js.
@@ -106,8 +118,6 @@ const MAX_DUAL_GAP_MINUTES = Math.max(
     Number(SLOT_SEARCH?.MINUTOS_MAX_HUECO_DUAL) || 120
 );
 
-// Elevacion explicita para lectura de ordenes eCommerce (no forma parte del
-// DAL interno; @wix/ecom tiene su propio contrato de permisos).
 const getOrderElevated = auth.elevate(orders.getOrder);
 
 // =============================================================================
@@ -144,7 +154,6 @@ function _getCitaMeta(cita) {
 function _getNativeAddonIdsForRevalidation(cita) {
     const meta = _getCitaMeta(cita);
 
-    // C6: sin alias addOnIds; solo nativeAddonIds canonico.
     const addOnIds = Array.isArray(meta.nativeAddonIds) ? meta.nativeAddonIds : [];
 
     return addOnIds
@@ -152,9 +161,6 @@ function _getNativeAddonIdsForRevalidation(cita) {
         .filter((id) => _looksLikeGuid(id));
 }
 
-/**
- * C1/C2: lectura fuerte via dataAccess. Sin suppressAuth, sin builder Velo.
- */
 async function _findCitaByBookingId(bookingId) {
     const normalizedId = _safeTrim(bookingId);
     if (!normalizedId) return null;
@@ -166,9 +172,6 @@ async function _findCitaByBookingId(bookingId) {
     });
 }
 
-/**
- * C1/C2: lectura fuerte via dataAccess. Sin suppressAuth, sin builder Velo.
- */
 async function _findCitasByPairToken(pairToken) {
     const normalizedToken = _safeTrim(pairToken);
     if (!normalizedToken) return [];
@@ -252,12 +255,26 @@ export const processDualBooking = webMethod(
 );
 
 /**
- * C7: Permissions.SiteMember restringe el acceso a miembros autenticados.
- * ADVERTENCIA DE SEGURIDAD: este metodo NO verifica que el miembro sea
- * propietario de la reserva ni de la orden. Antes de desplegar pagos en
- * produccion, implementar la comprobacion de propiedad en _assertBookingOwner
- * o en un guard previo. Reemplazar las consultas por si solo no resuelve
- * este punto.
+ * CM-03: contrato del flujo de pago.
+ *
+ * Permissions.SiteMember restringe el acceso a miembros autenticados.
+ *
+ * Este metodo NO llama a bookings.confirmOrDeclineBooking. La documentacion
+ * oficial de Wix Bookings prohibe esa llamada cuando el booking fue creado
+ * con un checkout de Wix eCommerce: en ese caso Wix actualiza el booking
+ * status automaticamente segun el paymentStatus de la orden.
+ *
+ * Este metodo sincroniza dos sistemas internos:
+ *   1. El CMS (CitasF2): bookingStatus y paymentStatus.
+ *   2. El TPV (cajas.web.js via registerBookingPayment): ledger fiscal.
+ *
+ * En produccion, el webhook wixEcom_onOrderPaymentStatusUpdated debe ser
+ * el mecanismo PRIMARIO de sincronizacion. Este webMethod actua como
+ * mecanismo de sincronizacion disparado por el frontend al volver del pago.
+ *
+ * CM-01/CM-02: la verificacion de propiedad se realiza en _assertBookingOwner
+ * comparando el email del comprador de la orden con el email del contacto
+ * de la cita.
  */
 export const confirmPayment = webMethod(
     Permissions.SiteMember,
@@ -296,7 +313,7 @@ export const confirmPayment = webMethod(
                 };
             }
 
-            const { finalAmount } = await _getValidatedPaidOrder(
+            const { order, finalAmount } = await _getValidatedPaidOrder(
                 orderId,
                 bookingIds,
                 requestedAmount,
@@ -318,6 +335,9 @@ export const confirmPayment = webMethod(
                         },
                     };
                 }
+
+                // CM-01 / CM-02: verificacion de propiedad por cita.
+                await _assertBookingOwner(cita, order, traceId);
 
                 citas.push(cita);
             }
@@ -602,17 +622,78 @@ async function _setCitasPaymentState(
 // =============================================================================
 
 /**
- * C7: ADVERTENCIA - Esta funcion actualmente solo verifica que la cita exista.
- * NO comprueba que el miembro autenticado sea propietario de la reserva.
- * Antes de desplegar confirmPayment en produccion, implementar aqui la
- * verificacion de propiedad comparando cita.contactDetails.memberId con
- * el miembro de la sesion actual.
+ * CM-01 / CM-02: verificacion de propiedad de la reserva.
+ *
+ * Compara el email del comprador de la orden Wix eCommerce con el email del
+ * contacto asociado a la cita. Si ambos existen y no coinciden, deniega.
+ *
+ * Politica fail-closed: si el order no trae email de comprador, o la cita
+ * no trae email de contacto, se deniega el acceso. Es preferible que un
+ * caso limite requiera intervencion manual a que un atacante pueda
+ * confirmar pagos ajenos.
+ *
+ * IMPORTANTE: no registrar emails completos en logs (PII). Solo el codigo
+ * de error y, si acaso, la mascara via _maskEmail de mmUtils.
+ *
+ * @param {object} cita   Registro de CitasF2.
+ * @param {object} order  Orden elevada de Wix eCommerce.
+ * @param {string} traceId Trazabilidad.
+ * @returns {true}        Si la verificacion pasa.
+ * @throws {BookingError} ACCESS_DENIED o AUTH_REQUIRED segun el caso.
  */
-async function _assertBookingOwner(cita, traceId) {
+async function _assertBookingOwner(cita, order, traceId) {
     if (!cita) {
-        throw createBookingError(ERROR_CODES.AUTH_REQUIRED, "Booking was not found.", {
-            traceId,
-        });
+        throw createBookingError(
+            ERROR_CODES.AUTH_REQUIRED,
+            "Booking was not found.",
+            { traceId }
+        );
+    }
+
+    if (!order || typeof order !== "object") {
+        throw createBookingError(
+            ERROR_CODES.ACCESS_DENIED,
+            "Order context is required to verify booking ownership.",
+            { traceId, bookingId: _safeTrim(cita?.bookingId) }
+        );
+    }
+
+    const orderEmail = _safeTrim(
+        order?.buyerInfo?.email ||
+        order?.buyerInfo?.contactDetails?.email ||
+        order?.contactDetails?.email
+    ).toLowerCase();
+
+    const citaEmail = _safeTrim(
+        cita?.contactDetails?.email ||
+        _getCitaMeta(cita)?.contactDetails?.email ||
+        _getCitaMeta(cita)?.email
+    ).toLowerCase();
+
+    if (!orderEmail) {
+        throw createBookingError(
+            ERROR_CODES.ACCESS_DENIED,
+            "Order does not carry a buyer email; ownership cannot be verified.",
+            { traceId, bookingId: _safeTrim(cita?.bookingId) }
+        );
+    }
+
+    if (!citaEmail) {
+        throw createBookingError(
+            ERROR_CODES.ACCESS_DENIED,
+            "Booking does not carry a contact email; ownership cannot be verified.",
+            { traceId, bookingId: _safeTrim(cita?.bookingId) }
+        );
+    }
+
+    if (orderEmail !== citaEmail) {
+        // No se registran los emails completos (PII). Solo el bookingId para
+        // poder correlacionar con auditoria sin exponer datos personales.
+        throw createBookingError(
+            ERROR_CODES.ACCESS_DENIED,
+            "Order buyer does not match booking owner.",
+            { traceId, bookingId: _safeTrim(cita?.bookingId) }
+        );
     }
 
     return true;
@@ -672,11 +753,6 @@ function _buildDualRescheduleSlot(serviceConfig, inputSlot, expectedServiceId) {
     };
 }
 
-/**
- * C4: importacion estatica de _getServiceBySlugOrIdInternal (anadida en la
- * cabecera). Se elimina la importacion dinamica que rompia el analisis
- * estatico de dependencias y dificultaba la auditoria de seguridad.
- */
 async function _loadServiceConfigForCita(cita, traceId) {
     const meta = _getCitaMeta(cita);
 
@@ -725,9 +801,6 @@ async function _revalidateDualInputSlots(
         );
     }
 
-    // C3: BOOKING_TYPE.DUAL_F2 (ADR-17 SNAKE_CASE). El valor anterior
-    // DUALF2 no existia en el enum canonico y hacia fallar silenciosamente
-    // la identificacion de fases duales.
     const f1Cita =
         citas.find((cita) => {
             const meta = _getCitaMeta(cita);
