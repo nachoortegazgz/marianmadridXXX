@@ -1,22 +1,18 @@
 /*
 MODULE: pages/calendario-2.js
-VERSION: v5003.8-BRIDGE-AND-STAFF-FIX
-BASE: v5003.7-ORIGIN-AND-INPUT-FIX
+VERSION: v5003.9-SYNTAX-RECOVERY
+BASE: v5003.7-ORIGIN-AND-INPUT-FIX + FULL SYNTAX RECOVERY
 Correcciones incluidas:
-FIX-BRIDGE-CONTRACT: handleSelection pasa localEndDate como 5o argumento
-       a resolveStaffForSlot. El backend lo requiere para validacion dual.
-FIX-CONTEXT-FIELD: Contexto usa serviceId (campo real del DTO) en vez de
-       primaryServiceGuid que no existe en el contrato de reservas.web.
-FIX-IMPORTS: PROTOCOLURLS, PROTOCOLUI, createWidgetBridge verificados
-       contra widgetBridge.js v5011-F2-CALLBACK-ALIGNED.
-FIX-CALLBACK: onWidgetMessage usa firma (message, reply) correcta segun
-       widgetBridge F2. El reply helper correlaciona automaticamente con
-       el messageId del mensaje entrante.
+- Restauracion completa de operadores corruptos por copy-paste:
+  month < 1, month > 12, &&, ||, ===, !==, =>, ??
+- Identificadores restaurados con guiones bajos y prefijos correctos
+- Template literals restaurados
+- Comentarios multilinea restaurados
+- Arrow functions restauradas
+- Catch vacios restaurados con parametro
 REQUISITOS:
-public/widgetBridge.js v5011+ debe exportar PROTOCOLURLS, PROTOCOLUI
-       y createWidgetBridge.
-El bridge debe aceptar allowOpaqueOrigin:true y llamar
-       onWidgetMessage(message, reply, bridge).
+public/widgetBridge.js debe exportar PROTOCOL_URLS, PROTOCOL_UI y createWidgetBridge.
+El bridge debe aceptar allowOpaqueOrigin:true y llamar onWidgetMessage(message, reply, bridge).
 URL debe incluir serviceId GUID o slug.
 */
 import wixLocation from "wix-location-frontend";
@@ -110,7 +106,7 @@ function createResultError(code, message) {
 }
 
 function getTimeoutMs() {
-    return Number(PROTOCOLUI.FRONTENDAPITIMEOUTMS) || 60000;
+    return Number(PROTOCOL_UI.FRONTEND_API_TIMEOUT_MS) || 60000;
 }
 
 function isValidYmd(value) {
@@ -134,9 +130,6 @@ async function loadServiceContext(params) {
         );
     }
     currentService = result.data;
-    // FIX-CONTEXT-FIELD: El DTO de reservas.web usa 'serviceId', no
-    // 'primaryServiceGuid'. El HTML del widget busca 'serviceId' en el
-    // contexto para formar URLs y llamadas posteriores.
     return {
         ...result.data,
         serviceId: result.data.serviceId || currentServiceId,
@@ -156,7 +149,7 @@ function handleNavigation(payload) {
         return true;
     }
     if (target === "PRIVACY") {
-        wixLocation.to(PROTOCOLURLS.PRIVACYPOLICY);
+        wixLocation.to(PROTOCOL_URLS.PRIVACY_POLICY);
         return true;
     }
     return false;
@@ -173,10 +166,11 @@ async function handleAvailability(payload, reply) {
             if (
                 !Number.isInteger(year) ||
                 !Number.isInteger(month) ||
-                month  12
+                month < 1 ||
+                month > 12
             ) {
                 result = createResultError(
-                    "INVALIDDATERANGE",
+                    "INVALID_DATE_RANGE",
                     "El mes o el año solicitado no es válido."
                 );
             } else {
@@ -218,7 +212,7 @@ async function handleAvailability(payload, reply) {
             }
         } else {
             result = createResultError(
-                "INVALIDAVAILABILITYREQUEST",
+                "INVALID_AVAILABILITY_REQUEST",
                 "Solicitud de disponibilidad no válida."
             );
         }
@@ -234,7 +228,7 @@ async function handleAvailability(payload, reply) {
         MESSAGE_TYPES.AVAIL,
         {
             ...(result || createResultError(
-                "EMPTYAVAILABILITYRESPONSE",
+                "EMPTY_AVAILABILITY_RESPONSE",
                 "No se recibió disponibilidad."
             )),
             action,
@@ -245,9 +239,6 @@ async function handleAvailability(payload, reply) {
 
 async function handleSelection(payload, reply) {
     const start = _safeTrim(payload.localStartDate || "");
-    // FIX-BRIDGE-CONTRACT: El backend resolveStaffForSlot acepta end como
-    // 5o argumento. Para slots duales, el HTML envia localEndDate en el
-    // payload SELECT. Sin este parametro, el backend no puede validar F2.
     const end = _safeTrim(payload.localEndDate || "");
     if (!start) {
         reply(
@@ -274,7 +265,7 @@ async function handleSelection(payload, reply) {
         reply(
             MESSAGE_TYPES.SELECT,
             result || createResultError(
-                "STAFFRESOLVEFAILED",
+                "STAFF_RESOLVE_FAILED",
                 "No se pudo validar el profesional."
             )
         );
@@ -282,7 +273,7 @@ async function handleSelection(payload, reply) {
         reply(
             MESSAGE_TYPES.SELECT,
             createResultError(
-                "STAFFRESOLVEFAILED",
+                "STAFF_RESOLVE_FAILED",
                 error && error.message
                     ? error.message
                     : "No se pudo validar el profesional."
@@ -304,7 +295,7 @@ async function handleBooking(message, reply, traceId) {
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
-                "INVALIDBOOKINGPAYLOAD",
+                "INVALID_BOOKING_PAYLOAD",
                 "Faltan los datos de la reserva."
             )
         );
@@ -323,7 +314,7 @@ async function handleBooking(message, reply, traceId) {
             "processDualBooking"
         );
         const bookingResult = result || createResultError(
-            "EMPTYBOOKINGRESPONSE",
+            "EMPTY_BOOKING_RESPONSE",
             "No se recibió respuesta de la reserva."
         );
         reply(MESSAGE_TYPES.BOOK, bookingResult);
@@ -356,7 +347,7 @@ async function handleBooking(message, reply, traceId) {
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
-                timeout ? "BOOKINGTIMEOUT" : "BOOKINGFAILED",
+                timeout ? "BOOKING_TIMEOUT" : "BOOKING_FAILED",
                 timeout
                     ? "La reserva está tardando demasiado. Comprueba su estado antes de volver a intentarlo."
                     : "No se pudo completar la reserva."
@@ -398,9 +389,7 @@ $w.onReady(async () => {
             // Wix may report an empty origin for this site-owned HTML component.
             allowOpaqueOrigin: true,
             onContextReady: async () => loadServiceContext(params),
-            // FIX-CALLBACK: Firma F2 correcta (message, reply, bridge).
-            // El reply helper de widgetBridge correlaciona automaticamente
-            // la respuesta con el messageId del mensaje entrante.
+            // Requires widgetBridge F2 callback signature.
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 const payload = getPayload(message);
