@@ -1,8 +1,18 @@
-/**
- * MODULE: pages/calendario-2.js
- * VERSION: v5003.5-FUNCTIONAL
- * STANDARDS: G10 ASCII Strict, Velo Native Optimized.
- */
+/*
+MODULE: pages/calendario-2.js
+VERSION: v5003.6-BRIDGE-ALIGNED
+
+Alineado con public/widgetBridge.js v5011-F2-CALLBACK-ALIGNED:
+- Importa MESSAGE_TYPES y configuración del puente desde widgetBridge, fuente única de protocolo.
+- Usa el ID confirmado #html1.
+- Recibe onWidgetMessage(message, reply, bridge). El segundo argumento es callable.
+- Correlaciona reply usando el mensaje original; el reply helper del puente conserva el messageId aunque se le pase payload como tercer argumento.
+- Corrige el regex de fecha a /^\d{4}-\d{2}-\d{2}$/.
+- No cambia el contrato del backend de reservas.
+
+IMPORTANTE: Este código presupone que public/widgetBridge.js ya tiene la modificación F2: onWidgetMessage(message, replyToMessage, bridge). Si sigue instalada la versión original, el segundo argumento será un objeto y el callback reply fallará.
+
+*/
 
 import wixLocation from "wix-location-frontend";
 import wixWindowFrontend from "wix-window-frontend";
@@ -16,9 +26,6 @@ import {
 } from "backend/reservas.web.js";
 
 import {
-    MESSAGE_TYPES,
-    URLS,
-    UI,
     makeTraceId,
     _safeTrim,
     _safeSlugOrId,
@@ -26,7 +33,13 @@ import {
     withTimeout
 } from "public/mmUtils";
 
-import { createWidgetBridge } from "public/widgetBridge";
+import {
+    MESSAGE_TYPES,
+    PROTOCOL_URLS,
+    PROTOCOL_UI,
+    createWidgetBridge
+} from "public/widgetBridge";
+
 import { processDualBooking } from "backend/citasManager.web.js";
 
 let currentServiceId = null;
@@ -35,14 +48,11 @@ let currentService = null;
 let bridge = null;
 
 function normalizeIdList(value) {
-    if (Array.isArray(value)) {
-        return value
-            .map((id) => _safeTrim(id))
-            .filter(Boolean);
-    }
+    const values = Array.isArray(value)
+        ? value
+        : _safeTrim(value || "").split(",");
 
-    return _safeTrim(value || "")
-        .split(",")
+    return values
         .map((id) => _safeTrim(id))
         .filter(Boolean);
 }
@@ -104,7 +114,7 @@ function createResultError(code, message) {
 }
 
 function getTimeoutMs() {
-    return Number(UI && UI.FRONTEND_API_TIMEOUT_MS) || 60000;
+    return Number(PROTOCOL_UI.FRONTEND_API_TIMEOUT_MS) || 60000;
 }
 
 async function loadServiceContext(params) {
@@ -137,14 +147,12 @@ function handleNavigation(payload) {
         .toUpperCase();
 
     if (target === "SERVICIOS") {
-        wixLocation.to(URLS && URLS.SERVICIOS || "/reserva-online");
+        wixLocation.to(PROTOCOL_URLS.SERVICIOS);
         return true;
     }
 
     if (target === "PRIVACY") {
-        wixLocation.to(
-            URLS && URLS.PRIVACY_POLICY || "/politica-de-privacidad"
-        );
+        wixLocation.to(PROTOCOL_URLS.PRIVACY_POLICY);
         return true;
     }
 
@@ -234,8 +242,7 @@ async function handleAvailability(payload, reply) {
             )),
             action,
             requestSequence: payload.requestSequence || 0
-        },
-        payload
+        }
     );
 }
 
@@ -248,8 +255,7 @@ async function handleSelection(payload, reply) {
             createResultError(
                 "INVALID_SLOT",
                 "El horario seleccionado no es válido."
-            ),
-            payload
+            )
         );
         return;
     }
@@ -272,8 +278,7 @@ async function handleSelection(payload, reply) {
             result || createResultError(
                 "STAFF_RESOLVE_FAILED",
                 "No se pudo validar el profesional."
-            ),
-            payload
+            )
         );
     } catch (error) {
         reply(
@@ -283,8 +288,7 @@ async function handleSelection(payload, reply) {
                 error && error.message
                     ? error.message
                     : "No se pudo validar el profesional."
-            ),
-            payload
+            )
         );
     }
 }
@@ -305,8 +309,7 @@ async function handleBooking(message, reply, traceId) {
             createResultError(
                 "INVALID_BOOKING_PAYLOAD",
                 "Faltan los datos de la reserva."
-            ),
-            message
+            )
         );
         return;
     }
@@ -330,7 +333,7 @@ async function handleBooking(message, reply, traceId) {
             "No se recibió respuesta de la reserva."
         );
 
-        reply(MESSAGE_TYPES.BOOK, bookingResult, message);
+        reply(MESSAGE_TYPES.BOOK, bookingResult);
 
         if (bookingResult.status === "SUCCESS") {
             try {
@@ -354,7 +357,7 @@ async function handleBooking(message, reply, traceId) {
         }
     } catch (error) {
         const timeout =
-            error && error.code === "TIMEOUT" ||
+            (error && error.code === "TIMEOUT") ||
             String(error && error.message || "")
                 .toUpperCase()
                 .includes("TIMEOUT");
@@ -366,8 +369,7 @@ async function handleBooking(message, reply, traceId) {
                 timeout
                     ? "La reserva está tardando demasiado. Comprueba su estado antes de volver a intentarlo."
                     : "No se pudo completar la reserva."
-            ),
-            message
+            )
         );
     }
 }
@@ -385,7 +387,7 @@ $w.onReady(async () => {
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
 
-    // ID confirmado por el usuario y el registro de Wix.
+    // This ID must match the HTML Component ID in the Wix Editor.
     const widget = $w("#html1");
 
     if (
