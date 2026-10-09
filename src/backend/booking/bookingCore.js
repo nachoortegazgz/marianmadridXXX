@@ -1,13 +1,20 @@
 /*
 MODULE: backend/booking/bookingCore.js
-VERSION: v5010.7-FISCAL-V20.4-CORE
-BASE: v5009-FISCAL-V20.2-CORE (version adjunta) + Fase 3 auditoria (INFORME.md S10)
+VERSION: v5010.8-LOCK-PARSER-FIX
+BASE: v5010.7-FISCAL-V20.4-CORE + PATCH _parseResourceIdFromSlotKey
 RESPONSIBILITY: Primitivas atomicas de reserva (simple y dual con gap) sobre
                 Bookings Writer V2. Locks, idempotencia, persistencia CitasF2.
 STANDARDS: ASCII only. No Node builtins. Cero suppressHooks. Cero aliases en escritura.
 CONTRATO: Reserva dual = DOS createBooking independientes unidos por pairToken.
-          Multiservice Booking queda PROHIBIDO (BIBLIA 3.6): no permite gap de
+          Multiservice Booking queda PROHIBIDO (Biblia 3.6): no permite gap de
           exposicion ni cancelacion independiente de fase.
+
+PATCH v5010.8:
+  - _parseResourceIdFromSlotKey corregido: el generador emite 5 partes
+    (slot), el parser anterior exigia 4 y
+    rechazaba toda clave generada, bloqueando la adquisicion de locks.
+  - Validaciones adicionales: prefijo "slot", servicePrefix no vacio,
+    epochMin numericos y coherentes (end > start). Fail-safe devuelve "".
 
 FIXES APLICADOS v5010.7 (FASE 3 - CARACTERIZACION Y CORRECCION):
 
@@ -29,26 +36,26 @@ CORE-09 (P0 suppressHooks ES NO-OP - R2/SSOT-14):
   Se elimina suppressHooks: true de las 6 operaciones sobre CITAS_COL y de los
   locks/transacciones. La escritura ahora CUMPLE el contrato del hook en vez de
   intentar esquivarlo. Se elimina tambien suppressAuth: true (no-op: el adaptador
-  ya eleva toda operacion; BIBLIA 16.2 manda elevate() por operacion).
+  ya eleva toda operacion; Biblia 16.2 manda elevate() por operacion).
 
-CORE-10 (P0 CITASF2 - esquema fisico real, cms.v8 / BIBLIA 5.4):
+CORE-10 (P0 CITASF2 - esquema fisico real, cms.v8 / Biblia 5.4):
   - startDate/endDate NO existen en CitasF2: se escribia dato que se perdia.
     Sustituidos por los campos canonicos slotStart/slotEnd.
-  - Añadidos catalogId, thirdPartyId y totalAmount (obligatorios en esquema).
-  - contactDetails minimizado a nombre/email/telefono (BIBLIA 0.5.8, RGPD).
-  - traceId exigido fail-fast: el hook lo valida y es obligatorio por BIBLIA 15.1.6.
+  - Anadidos catalogId, thirdPartyId y totalAmount (obligatorios en esquema).
+  - contactDetails minimizado a nombre/email/telefono (Biblia 0.5.8, RGPD).
+  - traceId exigido fail-fast: el hook lo valida y es obligatorio por Biblia 15.1.6.
 
-CORE-11 (P0 ENUMS EN FRONTERA - BIBLIA 6.1 vs 6.2):
+CORE-11 (P0 ENUMS EN FRONTERA - Biblia 6.1 vs 6.2):
   Wix nativo usa CANCELED / NOTPAID / PARTIALLYREFUNDED; el CMS persiste
   CANCELLED (doble L) / NO_SHOW / UNPAID / PARTIAL / PAID / REFUNDED. Se escribian
   valores nativos en CitasF2 => el hook beforeInsert rechazaba la fila.
-  Añadida traduccionunica de frontera toCmsBookingStatus / toCmsPaymentStatus
+  Anadida traduccion unica de frontera toCmsBookingStatus / toCmsPaymentStatus
   (acepta nativo EN, alias ES de dominio y valor ya canonico) + assertValidEnum.
   El estado de reembolso vive en paymentStatus, no en bookingStatus: un booking
   REFUNDED (Wix) persiste como CANCELLED + paymentStatus REFUNDED.
-  Se retiran las listas duales de alias ES en ESCRITURA (MATRIZ 2, anti-patron 0.3).
+  Se retiran las listas duales de alias ES en ESCRITURA (Matriz 2, anti-patron 0.3).
 
-CORE-12 (P0 CONTROL_OPERATIVO - BIBLIA 5.11 / 12.2):
+CORE-12 (P0 CONTROL_OPERATIVO - Biblia 5.11 / 12.2):
   Locks y transacciones se insertaban SIN controlType, SIN dedupeKey y SIN
   resourceId (exigido para SLOT_LOCK) => el hook rechazaba toda insercion y el
   mutex + la idempotencia dual quedaban inoperativos en silencio.
@@ -74,17 +81,17 @@ CORE-15 (P1 RANKING DE CARGA):
 CORE-16 (P2 CONTRATO DE RETORNO):
   _initTransaction lanzaba excepcion ante error de BD, rompiendo su propio contrato
   {success, error}. Devuelve DATABASE_ERROR. Logica de polling deduplicada en
-  _evaluatePendingTransaction (una sola ubicacion canonica, BIBLIA 0.5.2).
+  _evaluatePendingTransaction (una sola ubicacion canonica, Biblia 0.5.2).
 
 CORE-17 (P2 CONTROL_TYPE CANONICO):
   La transaccion de saga usa CONTROLTYPE.IDEMPOTENCY. BOOKINGTX (citado en
-  MATRIZ 3 como nombre logico de la coleccion absorbida) NO pertenece al enum
-  canonico BIBLIA 6.3 y seria rechazado por assertValidEnum.
+  Matriz 3 como nombre logico de la coleccion absorbida) NO pertenece al enum
+  canonico Biblia 6.3 y seria rechazado por assertValidEnum.
 
 PENDIENTE (requiere ADR, no se resuelve aqui):
   - ADR thirdPartyId: CitasF2 lo exige como FK a DatosFiscales.taxId, pero una
     reserva online anonima no tiene ficha fiscal. Se persiste vacio con log.warn.
-  - ADR Catalog V1 -> Cart V2 (BIBLIA 16.2, plazo Feb 2027): createCheckout/
+  - ADR Catalog V1 -> Cart V2 (Biblia 16.2, plazo Feb 2027): createCheckout/
     getCheckoutUrl siguen en @wix/ecom V1 por contrato con bookingSaga.
   - Migracion de dataLegacyAdapter a la API nombrada de dataAccess.js (R4).
 
@@ -99,8 +106,6 @@ v5008.2 | 2026-09-15 | Aligned + dead code removed.
 import { bookings } from "@wix/bookings";
 import { checkout } from "@wix/ecom";
 import { auth } from "@wix/essentials";
-// EXCEPCION DATA API (APENDICE C): acceso CMS server-side. El adaptador eleva
-// toda operacion y garantiza que los hooks de data.js se ejecutan siempre.
 import wixData from "backend/dataLegacyAdapter";
 import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
@@ -133,9 +138,6 @@ import {
 import {
     computeGapMinutes,
     getResourceIdsFromSlot,
-    // v5010.4 FASE 2: la huella canonica vive en bookingUtils (capa de utilidades
-    // puras; precedencia mmUtils > bookingUtils > core > web). Se importa para no
-    // reintroducir el ciclo bookingUtils -> bookingCore.
     _buildPairFingerprint,
 } from "backend/booking/bookingUtils";
 
@@ -143,11 +145,9 @@ const log = logger;
 
 const STAFFRESOURCETYPEID = API.STAFFRESOURCETYPEID;
 
-// v5010.4 FASE 2: unica definicion de la huella en bookingUtils; aqui solo se
-// reexporta la superficie publica historica (CORE-05), sin duplicar logica.
 export { _buildPairFingerprint };
 
-const CONFIGUREDLOCATIONID = safeTrim(SDKCONFIG && SDKCONFIG.LOCATIONID);
+const CONFIGUREDLOCATIONID = safeTrim(SDKCONFIG.LOCATION_ID);
 
 // =============================================================================
 // BLOQUE 1 - CODIGOS DE ERROR
@@ -184,11 +184,9 @@ export const ERROR_CODES = Object.freeze({
 // =============================================================================
 // BLOQUE 2 - ENUMS: FRONTERA WIX NATIVO  CMS PERSISTIDO (CORE-11)
 // =============================================================================
-/
- * BIBLIA 6.2. Unico contrato de persistencia para CitasF2. Se exporta para que
- * bookingSaga, citasManager y los tests compartan la misma fuente (elimina el
- * drift que hacia fallar 18 tests: usaban CANCELADO/PAGADO/UNPAID indistintamente).
- */
+// Biblia 6.2. Unico contrato de persistencia para CitasF2. Se exporta para que
+// bookingSaga, citasManager y los tests compartan la misma fuente (elimina el
+// drift que hacia fallar 18 tests: usaban CANCELADO/PAGADO/UNPAID indistintamente).
 export const CMSBOOKINGSTATUS = Object.freeze({
     PENDING: "PENDING",
     CONFIRMED: "CONFIRMED",
@@ -204,16 +202,14 @@ export const CMSPAYMENTSTATUS = Object.freeze({
     REFUNDED: "REFUNDED",
 });
 
-/
- * Tabla de traduccion hacia el enum persistido. Claves: enum nativo Wix
- * (BIBLIA 6.1) + alias ES de dominio tolerados SOLO en entrada (MATRIZ 2).
- * Decisiones documentadas:
- *  - WAITING_LIST / CREATED / UPDATED no existen en el CMS: se proyectan al
- *    estado funcional equivalente (PENDING / CONFIRMED).
- *  - REFUNDED y DECLINED como estado de RESERVA implican cita no celebrada:
- *    persisten CANCELLED. El reembolso se refleja en paymentStatus.
- *  - EXEMPT (servicio F2 NO_FEE) no genera importe pendiente: persiste PAID.
- */
+// Tabla de traduccion hacia el enum persistido. Claves: enum nativo Wix
+// (Biblia 6.1) + alias ES de dominio tolerados SOLO en entrada (Matriz 2).
+// Decisiones documentadas:
+//  - WAITING_LIST / CREATED / UPDATED no existen en el CMS: se proyectan al
+//    estado funcional equivalente (PENDING / CONFIRMED).
+//  - REFUNDED y DECLINED como estado de RESERVA implican cita no celebrada:
+//    persisten CANCELLED. El reembolso se refleja en paymentStatus.
+//  - EXEMPT (servicio F2 NO_FEE) no genera importe pendiente: persiste PAID.
 const WIXTOCMSBOOKINGSTATUS = Object.freeze({
     CREATED: "PENDING",
     PENDING: "PENDING",
@@ -257,7 +253,7 @@ const WIXTOCMSPAYMENTSTATUS = Object.freeze({
     EXENTO: "PAID",
 });
 
-/ Devuelve "" ante valor desconocido: assertValidEnum fallara explicitamente. */
+// Devuelve "" ante valor desconocido: assertValidEnum fallara explicitamente.
 export function _toCmsBookingStatus(value) {
     const v = _safeTrim(value).toUpperCase();
     if (!v) return "";
@@ -270,11 +266,9 @@ export function _toCmsPaymentStatus(value) {
     return WIXTOCMSPAYMENTSTATUS[v] || "";
 }
 
-/
- * Mapa inverso para la API de Wix (CORE-06). bookingSaga envia el SSOT espanol
- * (PAYMENTSTATUS.NOTPAID = "IMPAGADO") y Wix solo acepta su enum nativo EN.
- * Los valores ya nativos pasan sin cambio (identity pass-through).
- */
+// Mapa inverso para la API de Wix (CORE-06). bookingSaga envia el SSOT espanol
+// (PAYMENTSTATUS.NOTPAID = "IMPAGADO") y Wix solo acepta su enum nativo EN.
+// Los valores ya nativos pasan sin cambio (identity pass-through).
 const WIXNATIVEPAYMENT_STATUS = Object.freeze({
     UNDEFINED: "UNDEFINED",
     NOTPAID: "NOTPAID",
@@ -302,7 +296,7 @@ function _toWixNativePaymentStatus(value) {
     return WIXNATIVEPAYMENT_STATUS[v] || value;
 }
 
-/ Estado por defecto cuando el llamante no lo fija (logica heredada preservada). */
+// Estado por defecto cuando el llamante no lo fija (logica heredada preservada).
 function _deriveCmsBookingStatus(cmsPaymentStatus) {
     return cmsPaymentStatus === CMSPAYMENTSTATUS.UNPAID
         ? CMSBOOKINGSTATUS.PENDING
@@ -325,11 +319,9 @@ export const getCheckoutUrlElevated = auth.elevate(checkout.getCheckoutUrl);
 
 const _confirmOrDeclineElevatedRaw = auth.elevate(bookings.confirmOrDeclineBooking);
 
-/
- * CORE-06: wrapper elevado que traduce paymentStatus del SSOT al enum nativo que
- * acepta Wix Bookings. Sin esta traduccion Wix rechaza la confirmacion presencial.
- * Contrato preservado: (bookingId, options) -> respuesta nativa elevada.
- */
+// CORE-06: wrapper elevado que traduce paymentStatus del SSOT al enum nativo que
+// acepta Wix Bookings. Sin esta traduccion Wix rechaza la confirmacion presencial.
+// Contrato preservado: (bookingId, options) -> respuesta nativa elevada.
 export async function confirmOrDeclineBookingElevated(bookingId, options) {
     let normalizedOptions = options;
     if (options && typeof options === "object" && options.paymentStatus !== undefined) {
@@ -417,7 +409,7 @@ export function _handleError(error, context, traceId, logFn) {
 // =============================================================================
 // BLOQUE 5 - HELPERS COMPARTIDOS DE BAJO NIVEL
 // =============================================================================
-/ Unica ubicacion para leer payloadJson (campo canonico de ControlOperativo). */
+// Unica ubicacion para leer payloadJson (campo canonico de ControlOperativo).
 function _parsePayloadJson(text) {
     const raw = _safeTrim(text);
     if (!raw) return {};
@@ -468,12 +460,10 @@ export async function _resolveScheduleIdForResource(resourceId, sourceSlot) {
 // =============================================================================
 // BLOQUE 7 - NORMALIZACION DE SLOTS PARA WRITER V2 (CORE-02, CORE-04)
 // =============================================================================
-/
- * CORE-02: extraccion tolerante de addOnOptions desde el slot entrante.
- * Fuentes (por orden): slot.addOnIds, slot.selectedAddOns,
- * slot.customerChoices.addOnIds (forma usada en disponibilidad).
- * Solo se conservan GUIDs validos, deduplicados.
- */
+// CORE-02: extraccion tolerante de addOnOptions desde el slot entrante.
+// Fuentes (por orden): slot.addOnIds, slot.selectedAddOns,
+// slot.customerChoices.addOnIds (forma usada en disponibilidad).
+// Solo se conservan GUIDs validos, deduplicados.
 function _extractAddonIdsFromSlot(slot) {
     const customerChoices = slot && slot.customerChoices ? slot.customerChoices : {};
     const candidates = [].concat(
@@ -487,7 +477,7 @@ function _extractAddonIdsFromSlot(slot) {
     return Array.from(new Set(clean));
 }
 
-/ Convierte cualquier forma de fecha de slot a string local Madrid sin Z. */
+// Convierte cualquier forma de fecha de slot a string local Madrid sin Z.
 function _toMadridLocalString(rawValue) {
     if (rawValue instanceof Date) {
         return isNaN(rawValue.getTime()) ? "" : getMadridLocalStringNoZ(rawValue);
@@ -504,11 +494,9 @@ function _toMadridLocalString(rawValue) {
     return "";
 }
 
-/
- * Construye el objeto con forma bookingInfo que exige Bookings Writer V2 para
- * createBooking (BIBLIA 2.2.1 / 3.3): timezone en minusculas y locationType
- * OWNER_BUSINESS. Devuelve null ante cualquier dato no certificable (fail-fast).
- */
+// Construye el objeto con forma bookingInfo que exige Bookings Writer V2 para
+// createBooking (Biblia 2.2.1 / 3.3): timezone en minusculas y locationType
+// OWNER_BUSINESS. Devuelve null ante cualquier dato no certificable (fail-fast).
 export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverride, defaultDurationMinutes) {
     if (!slot || typeof slot !== "object") return null;
 
@@ -562,15 +550,13 @@ export function _extractCheckoutId(checkoutSession) {
 }
 
 // =============================================================================
-// BLOQUE 9 - SLOT KEYS (CORE-13)
+// BLOQUE 9 - SLOT KEYS (CORE-13 + PATCH v5010.8)
 // =============================================================================
-/
- * CORE-13: la clave embebe el resourceId COMPLETO para que el mutex pueda
- * satisfacer el requisito resourceId del hook de ControlOperativo sin cambiar
- * la firma publica de lockSlotKeyOrFail. Los GUID usan guiones (nunca ""),
- * por lo que el parseo por separador es determinista.
- * Formato: slot
- */
+// CORE-13: la clave embebe el resourceId COMPLETO para que el mutex pueda
+// satisfacer el requisito resourceId del hook de ControlOperativo sin cambiar
+// la firma publica de lockSlotKeyOrFail. Los GUID usan guiones (nunca ""),
+// por lo que el parseo por separador es determinista.
+// Formato: slot
 export function generateSlotKey(serviceId, resourceId, startDate, endDate) {
     const startUtc = startDate instanceof Date
         ? startDate
@@ -662,7 +648,7 @@ async function _writeTransaction(pairToken, state, existingDoc) {
     }
 }
 
-/ Veredicto reutilizable del polling: null significa "seguir esperando". */
+// Veredicto reutilizable del polling: null significa "seguir esperando".
 function _evaluatePendingTransaction(current, payloadHash) {
     if (!current) return null;
     if (current.payloadHash !== String(payloadHash || "")) {
@@ -703,8 +689,7 @@ export async function _initTransaction(pairToken, payloadHash, traceId) {
         const incomingRevision = Number(doc.revision) || 1;
         const currentRevision = Number(existingDoc.revision) || 1;
         if (incomingRevision  null (fail-fast, nunca sustitucion silenciosa). Sin ubicacion
- * util o sin GUID -> null.
- */
+// util o sin GUID -> null.
 export function _projectCertifiedSlot(slot, resourceId) {
     if (!slot || typeof slot !== "object") return null;
 
@@ -722,9 +707,8 @@ export function _projectCertifiedSlot(slot, resourceId) {
     const startDateUtc = getUtcDateFromMadridLocal(localStartDate);
     const endDateUtc = getUtcDateFromMadridLocal(localEndDate);
     if (!startDateUtc || !endDateUtc || endDateUtc.getTime()  slot -> slot.slot. Sin scheduleId util devuelve null EN
- * VEZ de proyectar scheduleId: "" (que Wix rechazaria en createBooking).
- * Nomenclatura V2 preservada: timezone en minusculas + OWNER_BUSINESS.
- */
+// VEZ de proyectar scheduleId: "" (que Wix rechazaria en createBooking).
+// Nomenclatura V2 preservada: timezone en minusculas + OWNER_BUSINESS.
 export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) {
     const projected = _projectCertifiedSlot(slot, resourceId);
     if (!projected) return null;
@@ -745,7 +729,7 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
         return null;
     }
 
-    let writerLocationType = safeTrim(SDKCONFIG && SDKCONFIG.LOCATIONTYPES && SDKCONFIG.LOCATIONTYPES.BOOKINGS_WRITER);
+    let writerLocationType = safeTrim(SDKCONFIG.LOCATIONTYPES && SDKCONFIG.LOCATIONTYPES.BOOKINGSWRITER);
     if (!writerLocationType || writerLocationType === "BUSINESS") writerLocationType = "OWNER_BUSINESS";
 
     const writerSlot = {
@@ -770,18 +754,16 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
 // =============================================================================
 // BLOQUE 17 - PAIR TOKEN CANONICO COMPARTIDO (CORE-05)
 // =============================================================================
-/
- * UNICA fuente de verdad de la huella del par dual. La definicion canonica vive en
- * bookingUtils.js; este modulo la reexporta como superficie publica historica.
- * La huella debe ser IDENTICA en los tres puntos donde se genera o consume un
- * pairToken:
- *   reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
- *   bookingSaga._resolveUnifiedPairToken         (consumidor / reemisor)
- *   ControlOperativo (IDEMPOTENCY).payloadHash   (persistencia)
- * Cualquier cambio en el orden o contenido de los 8 campos (serviceId,
- * linkedPhases, dateYmd, f1Start, f1End, f2Start, f2End, resourceId) rompe la
- * correlacion y la idempotencia del dual.
- */
+// UNICA fuente de verdad de la huella del par dual. La definicion canonica vive en
+// bookingUtils.js; este modulo la reexporta como superficie publica historica.
+// La huella debe ser IDENTICA en los tres puntos donde se genera o consume un
+// pairToken:
+//   reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
+//   bookingSaga._resolveUnifiedPairToken         (consumidor / reemisor)
+//   ControlOperativo (IDEMPOTENCY).payloadHash   (persistencia)
+// Cualquier cambio en el orden o contenido de los 8 campos (serviceId,
+// linkedPhases, dateYmd, f1Start, f1End, f2Start, f2End, resourceId) rompe la
+// correlacion y la idempotencia del dual.
 export function _buildPairTokenDeterministic(input) {
     return hashKey(buildPairFingerprint(input || {}));
 }
@@ -789,11 +771,9 @@ export function _buildPairTokenDeterministic(input) {
 // =============================================================================
 // BLOQUE 18 - RANKING DE RECURSOS POR CARGA (CORE-14, CORE-15)
 // =============================================================================
-/
- * Ordena los recursos disponibles de menor a mayor carga del dia para repartir
- * trabajo. Nunca deja la lista sin recursos: ante cualquier fallo devuelve el
- * orden original de disponibilidad.
- */
+// Ordena los recursos disponibles de menor a mayor carga del dia para repartir
+// trabajo. Nunca deja la lista sin recursos: ante cualquier fallo devuelve el
+// orden original de disponibilidad.
 export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
     const input = Array.isArray(resourceIds)
         ? Array.from(new Set(
@@ -829,7 +809,8 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
                 .find({ consistentRead: true });
 
             const items = result && Array.isArray(result.items) ? result.items : [];
-            for (const item of items) {
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
                 const itemResourceId = _safeTrim(item && item.resourceId);
                 if (!loads[itemResourceId]) continue;
 
@@ -861,7 +842,7 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
 }
 
 // Referencia interna para evitar que el linter marque BOOKING_STATUS como no usado:
-// el enum nativo Wix sigue siendo la autoridad en la frontera de la API (BIBLIA 6.1)
+// el enum nativo Wix sigue siendo la autoridad en la frontera de la API (Biblia 6.1)
 // y se consume a traves de PAYMENTSTATUS/BOOKINGSTATUS en _deriveCmsBookingStatus.
 export const NATIVEENUMSREFERENCE = Object.freeze({
     BOOKINGSTATUS: BOOKINGSTATUS,
