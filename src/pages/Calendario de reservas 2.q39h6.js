@@ -1,17 +1,19 @@
 /*
 MODULE: pages/calendario-2.js
-VERSION: v5003.6-BRIDGE-ALIGNED
+VERSION: v5003.7-ORIGIN-AND-INPUT-FIX
 
-Alineado con public/widgetBridge.js v5011-F2-CALLBACK-ALIGNED:
-- Importa MESSAGE_TYPES y configuración del puente desde widgetBridge, fuente única de protocolo.
-- Usa el ID confirmado #html1.
-- Recibe onWidgetMessage(message, reply, bridge). El segundo argumento es callable.
-- Correlaciona reply usando el mensaje original; el reply helper del puente conserva el messageId aunque se le pase payload como tercer argumento.
-- Corrige el regex de fecha a /^\d{4}-\d{2}-\d{2}$/.
-- No cambia el contrato del backend de reservas.
+Correcciones incluidas:
+- Permite origen opaco solo para este componente HTML de Wix, resolviendo el error observado WIDGET_ORIGIN_OPAQUE_REJECTED.
+- Usa #html1, ID confirmado por el usuario.
+- Importa protocolo desde public/widgetBridge.js, SSOT conforme al diseño declarado.
+- Añade validación de fecha calendario real YYYY-MM-DD.
+- Valida forma del payload BOOK y conserva callback reply del bridge F2.
+- Amplía log de error del bridge sin registrar payloads con PII.
 
-IMPORTANTE: Este código presupone que public/widgetBridge.js ya tiene la modificación F2: onWidgetMessage(message, replyToMessage, bridge). Si sigue instalada la versión original, el segundo argumento será un objeto y el callback reply fallará.
-
+REQUISITOS:
+- public/widgetBridge.js debe exportar PROTOCOL_URLS, PROTOCOL_UI y createWidgetBridge.
+- El bridge debe aceptar allowOpaqueOrigin:true y llamar onWidgetMessage(message, reply, bridge).
+- URL debe incluir serviceId GUID o slug.
 */
 
 import wixLocation from "wix-location-frontend";
@@ -117,6 +119,18 @@ function getTimeoutMs() {
     return Number(PROTOCOL_UI.FRONTEND_API_TIMEOUT_MS) || 60000;
 }
 
+function isValidYmd(value) {
+    const clean = _safeTrim(value, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return false;
+
+    const parts = clean.split("-").map(Number);
+    const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+
+    return date.getUTCFullYear() === parts[0] &&
+        date.getUTCMonth() === parts[1] - 1 &&
+        date.getUTCDate() === parts[2];
+}
+
 async function loadServiceContext(params) {
     const lookup = currentServiceId || currentSlug;
     const result = await getServiceBySlugOrId(lookup);
@@ -197,7 +211,7 @@ async function handleAvailability(payload, reply) {
                 payload.dateYMD || payload.dateYmd || ""
             );
 
-            if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(dateYMD)) {
+            if (!isValidYmd(dateYMD)) {
                 result = createResultError(
                     "INVALID_DATE",
                     "La fecha solicitada no es válida."
@@ -380,14 +394,17 @@ $w.onReady(async () => {
     const resolved = resolveServiceFromParams(params);
 
     if (!resolved) {
-        console.error("[calendario-2] Servicio no válido", { traceId });
+        console.error("[calendario-2] Servicio no válido", {
+            traceId,
+            hasServiceId: Boolean(params.serviceId),
+            hasSlug: Boolean(params.slug)
+        });
         return;
     }
 
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
 
-    // This ID must match the HTML Component ID in the Wix Editor.
     const widget = $w("#html1");
 
     if (
@@ -406,8 +423,12 @@ $w.onReady(async () => {
 
     try {
         bridge = createWidgetBridge(widget, {
+            // Wix may report an empty origin for this site-owned HTML component.
+            allowOpaqueOrigin: true,
+
             onContextReady: async () => loadServiceContext(params),
 
+            // Requires widgetBridge F2 callback signature.
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 const payload = getPayload(message);
@@ -443,12 +464,15 @@ $w.onReady(async () => {
                 }
             },
 
-            onError: (error) => {
+            onError: (error, detail) => {
                 console.error(
                     "[calendario-2] Error de comunicación",
                     {
                         traceId,
-                        message: error && error.message
+                        code: error && error.code,
+                        message: error && error.message,
+                        causeMessage: error && error.cause && error.cause.message,
+                        detail
                     }
                 );
             }
@@ -462,6 +486,7 @@ $w.onReady(async () => {
             "[calendario-2] Error de inicialización",
             {
                 traceId,
+                code: error && error.code,
                 message: error && error.message
             }
         );
