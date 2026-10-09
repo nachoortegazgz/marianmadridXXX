@@ -1,36 +1,58 @@
 /*
 =============================================================================
 MODULE: backend/booking/bookingSaga.js
-VERSION: v5009-FISCAL-V20.4-SAGA
-BASE: v5009-FISCAL-V20.2 + Afinado final contra BIBLIA v4
+VERSION: v5010.1-BOOKINGS-ALIGN
+BASE: v5009-FISCAL-V20.4-SAGA + Wix Bookings API alignment pass
 SSOT: SSOT CONSOLIDADO v5002.6 | BIBLIA v5009-V20-FINAL-CONSOLIDATED-v4
 MISSION: Orquestador transaccional. Saga compensable para reservas simples
          y duales con gap de exposicion. Gestiona locks, heartbeat,
          idempotencia triple capa y creacion SECUENCIAL F1 -> F2.
 STANDARDS: G10 ASCII Strict (0 non-ASCII characters).
 
-FIXES APLICADOS v5009-FISCAL-V20.3:
-  - SAGA-01: skipAvailabilityValidation = false (BIBLIA 2.2 regla 7:
-             "no desactivar nativo"). Wix re-valida disponibilidad real.
-  - SAGA-02: pairToken UNIFICADO. Prioridad absoluta al token emitido por
-             reservas.web.getCertifiedDualSlots. Fallback dual determinista
-             con la MISMA huella (_buildPairFingerprint, unica definicion en
-             bookingUtils y reexportada por bookingCore; sin copia local).
-             Fallback simple por _resolveStablePairToken.
-  - SAGA-03: OWNER_BUSINESS GARANTIZADO. Resolucion de locationId con
-             cascada (slot validado -> catalogo) + _assertPristineSlotContract
-             que BLOQUEA la creacion si el slot no cumple BIBLIA 2.2.1.
-  - SAGA-04: Addons inyectados (addOnIds) en bookedEntity.slot de F1 y F2,
-             con validacion de limite BIBLIA 3.2 (MAX_POR_RESERVA = 5).
-  - SAGA-05: PAYMENT_STATUS.NOT_PAID en confirmOrDecline (sin literales).
+FIXES APLICADOS v5010.1-BOOKINGS-ALIGN:
+  - SAGA-10: _compensateCreatedBookings propaga revision a
+             cancelBookingElevated. Wix Bookings exige el parametro revision
+             en cancelBooking para prevenir conflictos de concurrencia
+             ("To prevent conflicting changes, the current revision must be
+             specified when managing the booking"). Si el booking entry no
+             trae revision valido, NO se intenta cancelar: se encola una
+             compensacion manual con lastError=MISSING_REVISION y
+             alertRequired=true.
+  - SAGA-11: Documentacion contractual del flujo de confirmacion.
+             En ONLINE: NO se llama a confirmOrDeclineBookingElevated.
+             Wix eCommerce actualiza el booking status automaticamente
+             segun el paymentStatus de la orden. La documentacion oficial
+             de Wix Bookings lo prohibe explicitamente:
+             "Call this method only when using a custom checkout page.
+              Don't call it when using a Wix eCommerce checkout."
+             En PRESENCIAL: SI se llama, porque no hay checkout de eCommerce.
+  - SAGA-12: Los add-ons se pasan como bookedAddOns en el NIVEL RAIZ del
+             body de createBooking, NO dentro de bookedEntity.slot. La API
+             de Wix Bookings ignora silenciosamente addOnIds inyectados en
+             el slot. Contrato oficial:
+               bookings.createBooking({
+                 bookedEntity: { slot: {...} },
+                 bookedAddOns: [{ addOnId: "..." }, ...],
+                 ...
+               })
+  - SAGA-13: _detectAddons mapea IDs CMS (addOnId) a GUIDs nativos
+             (nativeId) del catalogo. Antes pasaba el ID CMS tal cual a
+             Wix, que lo rechazaba o ignoraba. Devuelve SOLO GUIDs nativos
+             deduplicados.
+  - SAGA-14: _buildAddonSlotFields eliminado (derogado por SAGA-12).
+             Se usa _buildBookedAddOns importado de bookingCore.
+  - SAGA-15: Header actualizado con changelog y referencias a la
+             documentacion oficial de Wix Bookings.
+
+FIXES APLICADOS v5009-FISCAL-V20.3 (heredados):
+  - SAGA-01: skipAvailabilityValidation = false (BIBLIA 2.2 regla 7).
+  - SAGA-02: pairToken UNIFICADO.
+  - SAGA-03: OWNER_BUSINESS GARANTIZADO.
+  - SAGA-04: Addons inyectados con validacion de limite BIBLIA 3.2.
+  - SAGA-05: PAYMENT_STATUS.NOT_PAID en confirmOrDecline.
   - SAGA-06: Compensacion NO cancela reservas CONFIRMED/CANCELLED/REFUNDED.
-             Compara contra enum nativo Wix Y valor SSOT espanol (BIBLIA
-             3.2.1: CONFIRMED -> CONFIRMADO, CANCELLED -> CANCELADO).
-  - SAGA-07: Constantes de configuracion V20 canonicas (BIBLIA 3.2.1
-             f13/f15/f16: MS_TTL_MUTEX, MS_LATIDO, MINUTOS_MAX_HUECO_DUAL).
-             v5010.4 FASE 2: cascadas legacy eliminadas; internalConfig ya
-             solo expone los nombres V20.
-  - SAGA-08: availableStaff se lee exclusivamente desde el campo canónico.
+  - SAGA-07: Constantes CONCURRENCY V20 canonicas.
+  - SAGA-08: availableStaff leido exclusivamente desde el campo canonico.
   - SAGA-09: selectedPaymentOption ONLINE en create cuando path eCom.
 
 NOTA CONTRACTUAL (BIBLIA 2.2.1):
@@ -43,6 +65,7 @@ NOTA CONTRACTUAL (BIBLIA 2.2.1):
   bookedEntity.slot.location       -> { id, locationType: OWNER_BUSINESS }
   contactDetails                   -> objeto contacto
   totalParticipants                -> 1
+  bookedAddOns                     -> [{ addOnId: GUID }] (raiz, NO en slot)
 =============================================================================
 */
 
@@ -108,11 +131,8 @@ import {
     normalizeError,
     ERROR_CODES,
     _extractCheckoutId,
-    // v5010.4 (FASE 2 / CORE-05): huella canonica UNICA (definida en
-    // bookingUtils, reexportada por bookingCore). SAGA-02 la consume para
-    // que el token FINGERPRINT coincida 1:1 con el emitido por
-    // reservas.web._getCertifiedDualSlotsInternal. Sin copia local.
     _buildPairFingerprint,
+    _buildBookedAddOns,
 } from "backend/booking/bookingCore";
 
 export { _extractCheckoutId };
@@ -127,22 +147,16 @@ import {
 const log = logger;
 
 // =============================================================================
-// CONSTANTES (SAGA-07: tolerantes al renombrado V20, BIBLIA 3.2.1)
+// CONSTANTES
 // =============================================================================
 
-// v5010.4 (FASE 2): SSOT renombrado a V20 (BIBLIA 3.2.1 f15/f16); cascada
-// legacy eliminada porque internalConfig ya no expone los nombres ingleses.
 const LOCKTTLMS = Number(CONCURRENCY?.MS_TTL_MUTEX) || 300000;
-
 const HEARTBEATMS = Number(CONCURRENCY?.MS_LATIDO) || 15000;
 
 const CITASCOL = BUSINESS_COLLECTIONS.CITAS_F2;
 const SERVICIOSCOL = BUSINESS_COLLECTIONS.SERVICIOS_CATALOGO;
-// FASE4 (ADR-05): CompensacionesPendientes absorbida en ControlOperativo.
 const COMPENSACIONESCOL = OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO;
 
-// v5010.4 (FASE 2): clave V20 segun BIBLIA 3.2.1 f13; cascada legacy
-// eliminada (internalConfig ya no expone MAX_DUAL_GAP_MINUTES).
 const MINUTOS_MAX_HUECO_DUAL = Math.max(
     0,
     Number(SLOT_SEARCH?.MINUTOS_MAX_HUECO_DUAL) || 120
@@ -187,12 +201,6 @@ const NON_CANCELABLE_STATUSES = new Set(
 // BLOCK 1 - PAIR TOKEN UNIFICADO (SAGA-02)
 // =============================================================================
 
-// v5010.4 (FASE 2): la copia local de _buildPairFingerprint fue ELIMINADA.
-// Unica fuente de verdad: bookingUtils._buildPairFingerprint, consumida aqui
-// via re-export de bookingCore (ver import arriba). Esto elimina el riesgo
-// normativo de divergencia silenciosa de huella entre saga y disponibilidad
-// (CORE-05 / SAGA-02).
-
 function _resolveStablePairToken({ serviceId, resourceId, f1Start, f2Start, email }) {
     const emailHash = _hashKey(_safeTrim(email).toLowerCase());
     const payload = _stableSerialize({
@@ -205,16 +213,6 @@ function _resolveStablePairToken({ serviceId, resourceId, f1Start, f2Start, emai
     return "pt_" + hash.slice(0, 32);
 }
 
-/**
- * SAGA-02: Resolucion unificada de pairToken.
- *
- * Prioridad:
- *   1. SUPPLIED       -> token emitido por getCertifiedDualSlots / frontend.
- *                        Es la unica via que garantiza correlacion exacta.
- *   2. FINGERPRINT    -> dual con resourceId explicito: misma huella que
- *                        reservas.web, por lo que el token coincide.
- *   3. STABLE         -> simple, o dual sin resourceId (degradado, con warn).
- */
 function _resolveUnifiedPairToken({
     suppliedPairToken,
     isDual,
@@ -315,20 +313,27 @@ async function _bestEffortUnlockAll(lockKeys, lockOwnerId) {
 }
 
 // =============================================================================
-// BLOCK 4 - BOOKING COMPENSATION (SAGA-06)
+// BLOCK 4 - BOOKING COMPENSATION (SAGA-06 + SAGA-10)
 // =============================================================================
 
+/**
+ * SAGA-06: nunca cancelar una reserva ya confirmada, cancelada o reembolsada.
+ *
+ * SAGA-10: Wix Bookings exige revision en cancelBooking. Si el booking entry
+ * no trae revision valido, NO se intenta cancelar: se encola una
+ * compensacion manual con alertRequired=true y lastError=MISSING_REVISION.
+ * Es preferible una alerta manual a un fallo silencioso que deje reservas
+ * huerfanas.
+ */
 async function _compensateCreatedBookings(createdBookings, traceId) {
     for (const booking of createdBookings || []) {
         const bookingId = booking?.bookingId || booking?.id;
         if (!bookingId) continue;
 
-        // FASE2 (ADR-06): lectura canonica bookingStatus PRIMERO; el legado
-        // "status" queda como fallback de LECTURA transitorio (EOL 31/12/2026).
-        const status = _safeTrim(booking?.[BOOKING_FIELDS.STATUS] || booking?.status).toUpperCase();
+        const status = _safeTrim(
+            booking?.[BOOKING_FIELDS.STATUS] || booking?.status
+        ).toUpperCase();
 
-        // SAGA-06: nunca cancelar una reserva ya confirmada, cancelada o
-        // reembolsada. Cancelar un CONFIRMED genera descuadre fiscal y de caja.
         if (status && NON_CANCELABLE_STATUSES.has(status)) {
             log.warn("Skipping compensation for non-cancelable booking", {
                 bookingId: bookingId,
@@ -339,11 +344,65 @@ async function _compensateCreatedBookings(createdBookings, traceId) {
             continue;
         }
 
+        // SAGA-10: revision obligatoria para cancelBooking.
+        const revision = Number(booking?.revision);
+        const hasValidRevision =
+            Number.isFinite(revision) && revision > 0 && Number.isInteger(revision);
+
+        if (!hasValidRevision) {
+            log.error(
+                "SAGA-10: booking without revision cannot be cancelled; queuing manual review",
+                {
+                    bookingId: String(bookingId),
+                    revisionRaw: booking?.revision,
+                    phase: booking?.phase || null,
+                    traceId: traceId,
+                }
+            );
+            try {
+                await wixData.insert(
+                    COMPENSACIONESCOL, {
+                        id: "COMP_MANUAL_" + bookingId + "_" + Date.now(),
+                        kind: COMPENSATION_KIND.CANCEL_BOOKING,
+                        compensationKind: COMPENSATION_KIND.CANCEL_BOOKING,
+                        bookingId: bookingId,
+                        phase: booking?.phase || "UNKNOWN",
+                        status: COMPENSATION_STATUS.PENDING,
+                        compensationStatus: COMPENSATION_STATUS.PENDING,
+                        attempts: 0,
+                        totalAmount: 0,
+                        paymentMethod: null,
+                        transactionId: null,
+                        orderId: null,
+                        refundId: null,
+                        operationDescription:
+                            "Manual cancellation required: booking lacks revision",
+                        movementType: null,
+                        alertRequired: true,
+                        lastError: "MISSING_REVISION",
+                        traceId: traceId,
+                        _createdDate: new Date(),
+                        _updatedDate: new Date(),
+                    }, { suppressAuth: true }
+                );
+            } catch (queueErr) {
+                log.error("Failed to queue manual compensation", {
+                    bookingId: bookingId,
+                    traceId: traceId,
+                    error: queueErr?.message,
+                });
+            }
+            continue;
+        }
+
         try {
             await _executeWithRetry(
                 () =>
                 withTimeout(
-                    () => cancelBookingElevated(bookingId, { suppressAuth: true }),
+                    () => cancelBookingElevated(bookingId, {
+                        revision,
+                        suppressAuth: true,
+                    }),
                     API_TIMEOUT_MS,
                     "cancelBookingCompensation"
                 ),
@@ -352,11 +411,14 @@ async function _compensateCreatedBookings(createdBookings, traceId) {
             );
             log.info("Compensated booking cancelled", {
                 bookingId: bookingId,
+                revision: revision,
+                phase: booking?.phase || null,
                 traceId: traceId,
             });
         } catch (cancelErr) {
             log.error("Compensation cancel failed; queuing", {
                 bookingId: bookingId,
+                revision: revision,
                 traceId: traceId,
                 error: cancelErr?.message,
             });
@@ -371,9 +433,6 @@ async function _compensateCreatedBookings(createdBookings, traceId) {
                         status: COMPENSATION_STATUS.PENDING,
                         compensationStatus: COMPENSATION_STATUS.PENDING,
                         attempts: 0,
-                        // v5010.7 SSOT: solo campos canonicos internos.
-                        // Alias legacy amount/concept eliminados (cero
-                        // lectores verificados por grep en src/).
                         totalAmount: 0,
                         paymentMethod: null,
                         transactionId: null,
@@ -503,7 +562,7 @@ function _validateDualGap(f1LocalEnd, f2LocalStart, traceId) {
     if (!f1EndUtc || !f2StartUtc) {
         throw createBookingError(
             ERROR_CODES.INVALID_DATES,
-            "Dual gap validation: could not convert to UTC", { traceId, f1EndLocal, f2StartLocal }
+            "Dual gap validation: could not convert to UTC", { traceId, f1EndLocal, f2LocalStart }
         );
     }
 
@@ -559,8 +618,6 @@ async function _validateLinkedPhaseService(linkedPhases, parentLocationId, trace
         );
     }
 
-    // BIBLIA 4.3 fila 20 + v5010.7 CERO LEGACY: unico campo canonic del
-    // catalogo V20 es clientHidden. Aliases hidden/hiddenCliente eliminados.
     const isHidden = service.clientHidden === true;
 
     if (isHidden) {
@@ -660,16 +717,26 @@ async function _deleteCitasByPairToken(pairToken, traceId) {
 }
 
 // =============================================================================
-// BLOCK 11 - ADDONS (FIX-35 + SAGA-04)
+// BLOCK 11 - ADDONS (FIX-35 + SAGA-04 + SAGA-13)
 // =============================================================================
 
+/**
+ * SAGA-13: detecta, valida y MAPEA los add-ons solicitados a GUIDs nativos.
+ *
+ * Entrada: IDs solicitados por el cliente (pueden ser CMS addOnId o
+ * native nativeId). Salida: SOLO GUIDs nativos, deduplicados.
+ *
+ * Si un ID solicitado no existe en el catalogo del servicio, se descarta
+ * con warn. Si existe pero le falta nativeId GUID, se descarta con warn.
+ * Si supera MAX_ADDONS_PER_BOOKING, lanza BookingError.
+ *
+ * @returns {string[]} GUIDs nativos listos para _buildBookedAddOns.
+ */
 function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
     const rawAddons =
         unsafePayload?.nativeAddonIds ||
         unsafePayload?.addOnIds ||
-        unsafePayload?.addOnIds ||
         metaCita?.nativeAddonIds ||
-        metaCita?.addOnIds ||
         metaCita?.addOnIds || [];
 
     const requested = Array.isArray(rawAddons) ?
@@ -689,76 +756,65 @@ function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
         );
     }
 
-    // Solo se envian a Wix los addOnOptions que existen en el catalogo del servicio.
-    const catalogAddons = Array.isArray(serviceConfig?.metadata?.addOnOptions) ?
+    // Catalogo canonico de add-ons del servicio. Acepta tanto el campo
+    // top-level como el metadata (ambos poblados por _mapServiceImport2ToUX).
+    const catalogAddons = Array.isArray(serviceConfig?.addOnOptions) ?
+        serviceConfig.addOnOptions :
+        Array.isArray(serviceConfig?.metadata?.addOnOptions) ?
         serviceConfig.metadata.addOnOptions :
         [];
 
-    let validated = unique;
-    if (unique.length > 0 && catalogAddons.length > 0) {
-        const allowed = new Set(
-            catalogAddons
-            .map(function (a) {
-                return [
-                    _safeTrim(a?.nativeId),
-                    _safeTrim(a?.id),
-                ].filter(Boolean);
-            })
-            .flat()
-        );
-        validated = unique.filter(function (id) { return allowed.has(id); });
+    // SAGA-13: mapeo CMS addOnId -> native nativeId (GUID).
+    const validated = [];
+    const seenNative = new Set();
 
-        if (validated.length !== unique.length) {
-            log.warn("SAGA-04: some requested addOnOptions are not in service catalog", {
+    for (const requestedId of unique) {
+        const match = catalogAddons.find(function (a) {
+            return (
+                _safeTrim(a?.addOnId) === requestedId ||
+                _safeTrim(a?.nativeId) === requestedId
+            );
+        });
+
+        if (!match) {
+            log.warn("SAGA-13: requested addon not in service catalog", {
                 traceId,
-                requested: unique,
-                accepted: validated,
+                requestedId,
             });
+            continue;
         }
+
+        const nativeId = _safeTrim(match.nativeId);
+        if (!nativeId || !_looksLikeGuid(nativeId)) {
+            log.warn("SAGA-13: catalog addon missing native GUID", {
+                traceId,
+                requestedId,
+                cmsAddOnId: _safeTrim(match.addOnId),
+            });
+            continue;
+        }
+
+        if (seenNative.has(nativeId)) continue;
+        seenNative.add(nativeId);
+        validated.push(nativeId);
     }
 
     if (validated.length > 0) {
-        log.info("SAGA-04: injecting addOnIds into bookedEntity.slot", {
+        log.info("SAGA-04/SAGA-13: addons resolved to native GUIDs", {
             traceId,
-            addonCount: validated.length,
-            addOnIds: validated,
+            requestedCount: unique.length,
+            validatedCount: validated.length,
+            nativeAddOnIds: validated,
         });
     }
 
     return validated;
 }
 
-/**
- * SAGA-04: campos de addon a fusionar en el slot antes de _forceStaffInPristineSlot.
- * Se exponen ambas claves porque el contrato del Writer V2 ha usado
- * historicamente addOnIds y selectedAddOns.
- */
-function _buildAddonSlotFields(addOnIds) {
-    if (!Array.isArray(addOnIds) || addOnIds.length === 0) return {};
-    return {
-        addOnIds: addOnIds.slice(),
-        selectedAddOns: addOnIds.slice(),
-    };
-}
-
 // =============================================================================
 // BLOCK 12 - UBICACION OWNER_BUSINESS (SAGA-03)
 // =============================================================================
 
-/**
- * SAGA-03: resuelve la ubicacion del booking forzando OWNER_BUSINESS.
- *
- * BIBLIA 2.2.1 fila 8 exige bookedEntity.slot.location.locationType =
- * OWNER_BUSINESS en creacion. La consulta de disponibilidad usa BUSINESS
- * (reservas.web.LOCATION_TS); la creacion usa OWNER_BUSINESS
- * (reservas.web.LOCATION_BOOKING). Aqui se garantiza el segundo.
- *
- * Cascada de resolucion del id:
- *   1. slot F1 validado (lo devolvio Wix)
- *   2. slot F2 validado
- *   3. catalogo del servicio (serviceConfig.locationId)
- *   4. parentLocationId resuelto en fase 0
- */
 function _resolveBookingLocation({
     validatedSlotF1,
     validatedSlotF2,
@@ -798,11 +854,6 @@ function _resolveBookingLocation({
     });
 }
 
-/**
- * SAGA-03: guard contractual. Bloquea la creacion si el pristine slot no
- * cumple BIBLIA 2.2.1. Fallar aqui es barato; fallar en Wix deja reservas
- * huerfanas que requieren compensacion.
- */
 function _assertPristineSlotContract(pristineSlot, phase, traceId) {
     const startIso = _safeTrim(pristineSlot?.startDate);
     const endIso = _safeTrim(pristineSlot?.endDate);
@@ -998,20 +1049,16 @@ export async function executeBookingSaga(unsafePayload) {
             _validateDualGap(f1LocalEnd, f2LocalStart, traceId);
         }
 
-        // SAGA-04: addOnOptions detectados y validados contra catalogo del servicio.
+        // SAGA-04 / SAGA-13: addOnOptions detectados, validados y mapeados a GUIDs nativos.
         const detectedAddonIds = _detectAddons(
             unsafePayload,
             metaCita,
             serviceConfig,
             traceId
         );
-        const addonSlotFields = _buildAddonSlotFields(detectedAddonIds);
 
         // =========================================================================
         // PHASE 1: REAL-TIME REVALIDATION
-        // Se ejecuta ANTES de resolver el pairToken definitivo porque la huella
-        // dual (SAGA-02) necesita el resourceId final balanceado por el backend
-        // de disponibilidad, que solo se conoce tras la revalidacion.
         // =========================================================================
         const resourceValidation = await _resolveStaffForSlotInternal({
             serviceId: serviceId,
@@ -1075,7 +1122,6 @@ export async function executeBookingSaga(unsafePayload) {
             pairToken: pairToken,
         });
 
-        // SAGA-03: ubicacion OWNER_BUSINESS garantizada para la creacion.
         const bookingLocation = _resolveBookingLocation({
             validatedSlotF1: validatedSlotF1,
             validatedSlotF2: validatedSlotF2,
@@ -1243,7 +1289,7 @@ export async function executeBookingSaga(unsafePayload) {
         // CREACION SECUENCIAL F1 -> F2
         // SAGA-01: skipAvailabilityValidation = false
         // SAGA-03: location OWNER_BUSINESS + guard de contrato
-        // SAGA-04: addOnIds inyectados
+        // SAGA-12: add-ons a nivel raiz como bookedAddOns (NO en el slot)
         // =========================================================================
         saga.addStep(
             "CreateBookings",
@@ -1259,12 +1305,14 @@ export async function executeBookingSaga(unsafePayload) {
                         phone: _safeTrim(unsafePayload?.phone || metaCita.phone || ""),
                     };
 
-                    // SAGA-01: opciones unicas para ambas fases.
                     const bookingOptions = Object.freeze({
                         flowControlSettings: Object.freeze({
                             skipAvailabilityValidation: SKIP_AVAILABILITY_VALIDATION,
                         }),
                     });
+
+                    // SAGA-12: bookedAddOns a nivel raiz del body.
+                    const bookedAddOns = _buildBookedAddOns(detectedAddonIds);
 
                     let bookingF1 = null;
                     let bookingF2 = null;
@@ -1274,8 +1322,7 @@ export async function executeBookingSaga(unsafePayload) {
                     // ---------------- F1 ----------------
                     const pristineF1 = await _forceStaffInPristineSlot(
                         Object.assign({},
-                            validatedSlotF1, { location: bookingLocation },
-                            addonSlotFields
+                            validatedSlotF1, { location: bookingLocation }
                         ),
                         finalResourceId,
                         serviceId,
@@ -1289,9 +1336,6 @@ export async function executeBookingSaga(unsafePayload) {
                         );
                     }
 
-                    // SAGA-03: el pristine slot puede haber perdido la ubicacion
-                    // si _forceStaffInPristineSlot reconstruye el objeto. Se
-                    // re-aplica y se valida el contrato BIBLIA 2.2.1.
                     pristineF1.location = bookingLocation;
                     _assertPristineSlotContract(pristineF1, "F1", traceId);
 
@@ -1300,6 +1344,9 @@ export async function executeBookingSaga(unsafePayload) {
                         contactDetails: contactDetails,
                         totalParticipants: 1,
                     };
+                    if (bookedAddOns.length > 0) {
+                        bookingBodyF1.bookedAddOns = bookedAddOns;
+                    }
                     const payMethodEarly = _safeTrim(
                         unsafePayload?.paymentMethod ||
                         PAYMENT_METHOD?.ONLINE ||
@@ -1333,8 +1380,7 @@ export async function executeBookingSaga(unsafePayload) {
                     if (isDual && f2LocalStart && validatedSlotF2) {
                         pristineF2 = await _forceStaffInPristineSlot(
                             Object.assign({},
-                                validatedSlotF2, { location: bookingLocation },
-                                addonSlotFields
+                                validatedSlotF2, { location: bookingLocation }
                             ),
                             finalResourceId,
                             linkedPhases,
@@ -1356,6 +1402,9 @@ export async function executeBookingSaga(unsafePayload) {
                             contactDetails: contactDetails,
                             totalParticipants: 1,
                         };
+                        if (bookedAddOns.length > 0) {
+                            bookingBodyF2.bookedAddOns = bookedAddOns;
+                        }
                         if (
                             payMethodEarly ===
                             _safeTrim(PAYMENT_METHOD?.ONLINE).toUpperCase() ||
@@ -1399,6 +1448,9 @@ export async function executeBookingSaga(unsafePayload) {
         // =========================================================================
         // CHECKOUT ONLINE / CONFIRMACION PRESENCIAL
         // SAGA-05: PAYMENT_STATUS.NOT_PAID (sin literales)
+        // SAGA-11: en ONLINE NO se llama a confirmOrDeclineBooking.
+        //          Wix eCommerce confirma automaticamente la reserva segun
+        //          el paymentStatus de la orden.
         // =========================================================================
         const paymentMethod = _safeTrim(
             unsafePayload?.paymentMethod || metaCita.paymentMethod || "PRESENCIAL"
@@ -1411,6 +1463,9 @@ export async function executeBookingSaga(unsafePayload) {
             isOnline ? "CreateCheckout" : "ConfirmPresencial",
             async function () {
                     if (isOnline) {
+                        // SAGA-11: solo se crea el checkout. NO se llama a
+                        // confirmOrDeclineBookingElevated. La confirmacion la
+                        // hara Wix eCommerce cuando la orden pase a PAID.
                         const bookingIds = createdBookings
                             .map(function (b) { return b.bookingId; })
                             .filter(Boolean);
@@ -1456,13 +1511,14 @@ export async function executeBookingSaga(unsafePayload) {
                         };
                     }
 
+                    // Flujo PRESENCIAL (custom checkout): aqui SI se llama a
+                    // confirmOrDeclineBooking porque no hay eCommerce checkout.
                     for (const booking of createdBookings) {
                         const confirmResult = await _executeWithRetry(
                             () =>
                             withTimeout(
                                 () =>
                                 confirmOrDeclineBookingElevated(booking.bookingId, {
-                                    // SAGA-05: constante SSOT, nunca literal.
                                     paymentStatus: PAYMENT_STATUS_NOT_PAID,
                                 }),
                                 API_TIMEOUT_MS,
@@ -1477,11 +1533,6 @@ export async function executeBookingSaga(unsafePayload) {
                             traceId
                         );
 
-                        // SAGA-06: tras confirmar, el booking pasa a CONFIRMED y ya
-                        // no es cancelable. Se actualiza el estado local para que la
-                        // compensacion posterior lo respete.
-                        // FASE2 (ADR-06): se escribe en bookingStatus (canonico);
-                        // el setter legado "status" queda eliminado del objeto local.
                         booking.bookingStatus =
                             _safeTrim(confirmResult?.booking?.bookingStatus) ||
                             _safeTrim(confirmResult?.booking?.status) ||
