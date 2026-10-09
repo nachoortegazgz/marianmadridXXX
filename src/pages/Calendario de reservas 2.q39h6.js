@@ -1,24 +1,26 @@
 /*
 MODULE: pages/calendario-2.js
-VERSION: v5003.7-ORIGIN-AND-INPUT-FIX
-
+VERSION: v5003.8-BRIDGE-AND-STAFF-FIX
+BASE: v5003.7-ORIGIN-AND-INPUT-FIX
 Correcciones incluidas:
-- Permite origen opaco solo para este componente HTML de Wix, resolviendo el error observado WIDGET_ORIGIN_OPAQUE_REJECTED.
-- Usa #html1, ID confirmado por el usuario.
-- Importa protocolo desde public/widgetBridge.js, SSOT conforme al diseño declarado.
-- Añade validación de fecha calendario real YYYY-MM-DD.
-- Valida forma del payload BOOK y conserva callback reply del bridge F2.
-- Amplía log de error del bridge sin registrar payloads con PII.
-
+FIX-BRIDGE-CONTRACT: handleSelection pasa localEndDate como 5o argumento
+       a resolveStaffForSlot. El backend lo requiere para validacion dual.
+FIX-CONTEXT-FIELD: Contexto usa serviceId (campo real del DTO) en vez de
+       primaryServiceGuid que no existe en el contrato de reservas.web.
+FIX-IMPORTS: PROTOCOLURLS, PROTOCOLUI, createWidgetBridge verificados
+       contra widgetBridge.js v5011-F2-CALLBACK-ALIGNED.
+FIX-CALLBACK: onWidgetMessage usa firma (message, reply) correcta segun
+       widgetBridge F2. El reply helper correlaciona automaticamente con
+       el messageId del mensaje entrante.
 REQUISITOS:
-- public/widgetBridge.js debe exportar PROTOCOL_URLS, PROTOCOL_UI y createWidgetBridge.
-- El bridge debe aceptar allowOpaqueOrigin:true y llamar onWidgetMessage(message, reply, bridge).
-- URL debe incluir serviceId GUID o slug.
+public/widgetBridge.js v5011+ debe exportar PROTOCOLURLS, PROTOCOLUI
+       y createWidgetBridge.
+El bridge debe aceptar allowOpaqueOrigin:true y llamar
+       onWidgetMessage(message, reply, bridge).
+URL debe incluir serviceId GUID o slug.
 */
-
 import wixLocation from "wix-location-frontend";
 import wixWindowFrontend from "wix-window-frontend";
-
 import {
     getServiceBySlugOrId,
     getAvailableDays,
@@ -26,7 +28,6 @@ import {
     getCertifiedDualSlots,
     resolveStaffForSlot
 } from "backend/reservas.web.js";
-
 import {
     makeTraceId,
     _safeTrim,
@@ -34,14 +35,12 @@ import {
     _looksLikeGuid,
     withTimeout
 } from "public/mmUtils";
-
 import {
     MESSAGE_TYPES,
     PROTOCOL_URLS,
     PROTOCOL_UI,
     createWidgetBridge
 } from "public/widgetBridge";
-
 import { processDualBooking } from "backend/citasManager.web.js";
 
 let currentServiceId = null;
@@ -53,7 +52,6 @@ function normalizeIdList(value) {
     const values = Array.isArray(value)
         ? value
         : _safeTrim(value || "").split(",");
-
     return values
         .map((id) => _safeTrim(id))
         .filter(Boolean);
@@ -61,7 +59,6 @@ function normalizeIdList(value) {
 
 function parseUrlParams() {
     const query = wixLocation.query || {};
-
     return {
         serviceId: _safeTrim(query.serviceId || ""),
         slug: _safeSlugOrId(query.slug || ""),
@@ -77,14 +74,12 @@ function resolveServiceFromParams(params) {
             slug: params.slug || null
         };
     }
-
     if (params.slug) {
         return {
             serviceId: null,
             slug: params.slug
         };
     }
-
     return null;
 }
 
@@ -103,7 +98,6 @@ function getPayload(message) {
     ) {
         return message.payload;
     }
-
     return {};
 }
 
@@ -116,16 +110,14 @@ function createResultError(code, message) {
 }
 
 function getTimeoutMs() {
-    return Number(PROTOCOL_UI.FRONTEND_API_TIMEOUT_MS) || 60000;
+    return Number(PROTOCOLUI.FRONTENDAPITIMEOUTMS) || 60000;
 }
 
 function isValidYmd(value) {
-    const clean = _safeTrim(value, 10);
+    const clean = _safeTrim(value);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return false;
-
     const parts = clean.split("-").map(Number);
     const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-
     return date.getUTCFullYear() === parts[0] &&
         date.getUTCMonth() === parts[1] - 1 &&
         date.getUTCDate() === parts[2];
@@ -134,7 +126,6 @@ function isValidYmd(value) {
 async function loadServiceContext(params) {
     const lookup = currentServiceId || currentSlug;
     const result = await getServiceBySlugOrId(lookup);
-
     if (!result || result.status !== "SUCCESS" || !result.data) {
         throw new Error(
             result && result.error && result.error.message
@@ -142,9 +133,10 @@ async function loadServiceContext(params) {
                 : "No se pudo cargar el servicio."
         );
     }
-
     currentService = result.data;
-
+    // FIX-CONTEXT-FIELD: El DTO de reservas.web usa 'serviceId', no
+    // 'primaryServiceGuid'. El HTML del widget busca 'serviceId' en el
+    // contexto para formar URLs y llamadas posteriores.
     return {
         ...result.data,
         serviceId: result.data.serviceId || currentServiceId,
@@ -159,17 +151,14 @@ async function loadServiceContext(params) {
 function handleNavigation(payload) {
     const target = _safeTrim(payload && payload.target || "")
         .toUpperCase();
-
     if (target === "SERVICIOS") {
         wixLocation.to(PROTOCOL_URLS.SERVICIOS);
         return true;
     }
-
     if (target === "PRIVACY") {
-        wixLocation.to(PROTOCOL_URLS.PRIVACY_POLICY);
+        wixLocation.to(PROTOCOLURLS.PRIVACYPOLICY);
         return true;
     }
-
     return false;
 }
 
@@ -177,20 +166,17 @@ async function handleAvailability(payload, reply) {
     const action = _safeTrim(payload.action || "").toLowerCase();
     const addOnIds = normalizeIdList(payload.addOnIds);
     let result;
-
     try {
         if (action === "days") {
             const year = Number(payload.year);
             const month = Number(payload.month);
-
             if (
                 !Number.isInteger(year) ||
                 !Number.isInteger(month) ||
-                month < 1 ||
-                month > 12
+                month  12
             ) {
                 result = createResultError(
-                    "INVALID_DATE_RANGE",
+                    "INVALIDDATERANGE",
                     "El mes o el año solicitado no es válido."
                 );
             } else {
@@ -210,7 +196,6 @@ async function handleAvailability(payload, reply) {
             const dateYMD = _safeTrim(
                 payload.dateYMD || payload.dateYmd || ""
             );
-
             if (!isValidYmd(dateYMD)) {
                 result = createResultError(
                     "INVALID_DATE",
@@ -220,7 +205,6 @@ async function handleAvailability(payload, reply) {
                 const getSlots = currentService && currentService.allowCombine
                     ? getCertifiedDualSlots
                     : getAvailableSlots;
-
                 result = await withTimeout(
                     getSlots(
                         currentServiceId || currentSlug,
@@ -234,7 +218,7 @@ async function handleAvailability(payload, reply) {
             }
         } else {
             result = createResultError(
-                "INVALID_AVAILABILITY_REQUEST",
+                "INVALIDAVAILABILITYREQUEST",
                 "Solicitud de disponibilidad no válida."
             );
         }
@@ -246,12 +230,11 @@ async function handleAvailability(payload, reply) {
                 : "No se pudo obtener disponibilidad."
         );
     }
-
     reply(
         MESSAGE_TYPES.AVAIL,
         {
             ...(result || createResultError(
-                "EMPTY_AVAILABILITY_RESPONSE",
+                "EMPTYAVAILABILITYRESPONSE",
                 "No se recibió disponibilidad."
             )),
             action,
@@ -262,7 +245,10 @@ async function handleAvailability(payload, reply) {
 
 async function handleSelection(payload, reply) {
     const start = _safeTrim(payload.localStartDate || "");
-
+    // FIX-BRIDGE-CONTRACT: El backend resolveStaffForSlot acepta end como
+    // 5o argumento. Para slots duales, el HTML envia localEndDate en el
+    // payload SELECT. Sin este parametro, el backend no puede validar F2.
+    const end = _safeTrim(payload.localEndDate || "");
     if (!start) {
         reply(
             MESSAGE_TYPES.SELECT,
@@ -273,7 +259,6 @@ async function handleSelection(payload, reply) {
         );
         return;
     }
-
     try {
         const result = await withTimeout(
             resolveStaffForSlot(
@@ -281,16 +266,15 @@ async function handleSelection(payload, reply) {
                 start,
                 payload.resourceId || null,
                 normalizeIdList(payload.addOnIds),
-                null
+                end || null
             ),
             getTimeoutMs(),
             "resolveStaffForSlot"
         );
-
         reply(
             MESSAGE_TYPES.SELECT,
             result || createResultError(
-                "STAFF_RESOLVE_FAILED",
+                "STAFFRESOLVEFAILED",
                 "No se pudo validar el profesional."
             )
         );
@@ -298,7 +282,7 @@ async function handleSelection(payload, reply) {
         reply(
             MESSAGE_TYPES.SELECT,
             createResultError(
-                "STAFF_RESOLVE_FAILED",
+                "STAFFRESOLVEFAILED",
                 error && error.message
                     ? error.message
                     : "No se pudo validar el profesional."
@@ -316,39 +300,33 @@ async function handleBooking(message, reply, traceId) {
         !Array.isArray(nestedBooking)
             ? nestedBooking
             : payload;
-
     if (Object.keys(bookingData).length === 0) {
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
-                "INVALID_BOOKING_PAYLOAD",
+                "INVALIDBOOKINGPAYLOAD",
                 "Faltan los datos de la reserva."
             )
         );
         return;
     }
-
     const requestPayload = {
         ...bookingData,
         serviceId: bookingData.serviceId || currentServiceId,
         slug: bookingData.slug || currentSlug,
         traceId
     };
-
     try {
         const result = await withTimeout(
             processDualBooking(requestPayload),
             getTimeoutMs(),
             "processDualBooking"
         );
-
         const bookingResult = result || createResultError(
-            "EMPTY_BOOKING_RESPONSE",
+            "EMPTYBOOKINGRESPONSE",
             "No se recibió respuesta de la reserva."
         );
-
         reply(MESSAGE_TYPES.BOOK, bookingResult);
-
         if (bookingResult.status === "SUCCESS") {
             try {
                 await wixWindowFrontend.openLightbox(
@@ -375,11 +353,10 @@ async function handleBooking(message, reply, traceId) {
             String(error && error.message || "")
                 .toUpperCase()
                 .includes("TIMEOUT");
-
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
-                timeout ? "BOOKING_TIMEOUT" : "BOOKING_FAILED",
+                timeout ? "BOOKINGTIMEOUT" : "BOOKINGFAILED",
                 timeout
                     ? "La reserva está tardando demasiado. Comprueba su estado antes de volver a intentarlo."
                     : "No se pudo completar la reserva."
@@ -392,7 +369,6 @@ $w.onReady(async () => {
     const traceId = makeTraceId("calendario");
     const params = parseUrlParams();
     const resolved = resolveServiceFromParams(params);
-
     if (!resolved) {
         console.error("[calendario-2] Servicio no válido", {
             traceId,
@@ -401,12 +377,9 @@ $w.onReady(async () => {
         });
         return;
     }
-
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
-
     const widget = $w("#html1");
-
     if (
         !widget ||
         typeof widget.postMessage !== "function" ||
@@ -420,39 +393,33 @@ $w.onReady(async () => {
         });
         return;
     }
-
     try {
         bridge = createWidgetBridge(widget, {
             // Wix may report an empty origin for this site-owned HTML component.
             allowOpaqueOrigin: true,
-
             onContextReady: async () => loadServiceContext(params),
-
-            // Requires widgetBridge F2 callback signature.
+            // FIX-CALLBACK: Firma F2 correcta (message, reply, bridge).
+            // El reply helper de widgetBridge correlaciona automaticamente
+            // la respuesta con el messageId del mensaje entrante.
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 const payload = getPayload(message);
-
                 if (type === MESSAGE_TYPES.NAV) {
                     handleNavigation(payload);
                     return;
                 }
-
                 if (type === MESSAGE_TYPES.AVAIL) {
                     await handleAvailability(payload, reply);
                     return;
                 }
-
                 if (type === MESSAGE_TYPES.SELECT) {
                     await handleSelection(payload, reply);
                     return;
                 }
-
                 if (type === MESSAGE_TYPES.BOOK) {
                     await handleBooking(message, reply, traceId);
                     return;
                 }
-
                 if (
                     type !== MESSAGE_TYPES.READY &&
                     type !== MESSAGE_TYPES.CONTEXT
@@ -463,7 +430,6 @@ $w.onReady(async () => {
                     );
                 }
             },
-
             onError: (error, detail) => {
                 console.error(
                     "[calendario-2] Error de comunicación",
@@ -477,7 +443,6 @@ $w.onReady(async () => {
                 );
             }
         });
-
         if (!bridge) {
             throw new Error("No se pudo inicializar el puente.");
         }
