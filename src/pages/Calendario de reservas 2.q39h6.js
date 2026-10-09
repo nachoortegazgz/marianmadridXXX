@@ -1,8 +1,20 @@
-/**
- * MODULE: pages/calendario-2.js
- * VERSION: v5003.4-FUNCTIONAL
- * STANDARDS: G10 ASCII Strict, Velo Native Optimized.
- */
+/*
+MODULE: pages/calendario-2.js
+VERSION: v5003.7-ORIGIN-AND-INPUT-FIX
+
+Correcciones incluidas:
+- Permite origen opaco solo para este componente HTML de Wix, resolviendo el error observado WIDGET_ORIGIN_OPAQUE_REJECTED.
+- Usa #html1, ID confirmado por el usuario.
+- Importa protocolo desde public/widgetBridge.js, SSOT conforme al diseño declarado.
+- Añade validación de fecha calendario real YYYY-MM-DD.
+- Valida forma del payload BOOK y conserva callback reply del bridge F2.
+- Amplía log de error del bridge sin registrar payloads con PII.
+
+REQUISITOS:
+- public/widgetBridge.js debe exportar PROTOCOL_URLS, PROTOCOL_UI y createWidgetBridge.
+- El bridge debe aceptar allowOpaqueOrigin:true y llamar onWidgetMessage(message, reply, bridge).
+- URL debe incluir serviceId GUID o slug.
+*/
 
 import wixLocation from "wix-location-frontend";
 import wixWindowFrontend from "wix-window-frontend";
@@ -16,9 +28,6 @@ import {
 } from "backend/reservas.web.js";
 
 import {
-    MESSAGE_TYPES,
-    URLS,
-    UI,
     makeTraceId,
     _safeTrim,
     _safeSlugOrId,
@@ -26,13 +35,29 @@ import {
     withTimeout
 } from "public/mmUtils";
 
-import { createWidgetBridge } from "public/widgetBridge";
+import {
+    MESSAGE_TYPES,
+    PROTOCOL_URLS,
+    PROTOCOL_UI,
+    createWidgetBridge
+} from "public/widgetBridge";
+
 import { processDualBooking } from "backend/citasManager.web.js";
 
 let currentServiceId = null;
 let currentSlug = null;
 let currentService = null;
 let bridge = null;
+
+function normalizeIdList(value) {
+    const values = Array.isArray(value)
+        ? value
+        : _safeTrim(value || "").split(",");
+
+    return values
+        .map((id) => _safeTrim(id))
+        .filter(Boolean);
+}
 
 function parseUrlParams() {
     const query = wixLocation.query || {};
@@ -41,10 +66,7 @@ function parseUrlParams() {
         serviceId: _safeTrim(query.serviceId || ""),
         slug: _safeSlugOrId(query.slug || ""),
         referral: _safeTrim(query.referral || ""),
-        addOnIds: _safeTrim(query.addOnIds || "")
-            .split(",")
-            .map(_safeTrim)
-            .filter(Boolean)
+        addOnIds: normalizeIdList(query.addOnIds)
     };
 }
 
@@ -93,14 +115,31 @@ function createResultError(code, message) {
     };
 }
 
+function getTimeoutMs() {
+    return Number(PROTOCOL_UI.FRONTEND_API_TIMEOUT_MS) || 60000;
+}
+
+function isValidYmd(value) {
+    const clean = _safeTrim(value, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(clean)) return false;
+
+    const parts = clean.split("-").map(Number);
+    const date = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+
+    return date.getUTCFullYear() === parts[0] &&
+        date.getUTCMonth() === parts[1] - 1 &&
+        date.getUTCDate() === parts[2];
+}
+
 async function loadServiceContext(params) {
     const lookup = currentServiceId || currentSlug;
     const result = await getServiceBySlugOrId(lookup);
 
     if (!result || result.status !== "SUCCESS" || !result.data) {
         throw new Error(
-            result?.error?.message ||
-            "No se pudo cargar el servicio."
+            result && result.error && result.error.message
+                ? result.error.message
+                : "No se pudo cargar el servicio."
         );
     }
 
@@ -117,18 +156,17 @@ async function loadServiceContext(params) {
     };
 }
 
-async function handleNavigation(payload) {
-    const target = _safeTrim(payload?.target || "").toUpperCase();
+function handleNavigation(payload) {
+    const target = _safeTrim(payload && payload.target || "")
+        .toUpperCase();
 
     if (target === "SERVICIOS") {
-        wixLocation.to(URLS?.SERVICIOS || "/reserva-online");
+        wixLocation.to(PROTOCOL_URLS.SERVICIOS);
         return true;
     }
 
     if (target === "PRIVACY") {
-        wixLocation.to(
-            URLS?.PRIVACY_POLICY || "/politica-de-privacidad"
-        );
+        wixLocation.to(PROTOCOL_URLS.PRIVACY_POLICY);
         return true;
     }
 
@@ -137,52 +175,75 @@ async function handleNavigation(payload) {
 
 async function handleAvailability(payload, reply) {
     const action = _safeTrim(payload.action || "").toLowerCase();
-    const addOnIds = Array.isArray(payload.addOnIds)
-        ? payload.addOnIds
-        : [];
+    const addOnIds = normalizeIdList(payload.addOnIds);
     let result;
 
     try {
         if (action === "days") {
-            result = await withTimeout(
-                getAvailableDays(
-                    currentServiceId || currentSlug,
-                    payload.resourceId || null,
-                    Number(payload.year),
-                    Number(payload.month),
-                    addOnIds
-                ),
-                UI?.FRONTEND_API_TIMEOUT_MS || 60000,
-                "getAvailableDays"
-            );
-        } else if (action === "slots") {
-            result = await withTimeout(
-                currentService?.allowCombine
-                    ? getCertifiedDualSlots(
+            const year = Number(payload.year);
+            const month = Number(payload.month);
+
+            if (
+                !Number.isInteger(year) ||
+                !Number.isInteger(month) ||
+                month < 1 ||
+                month > 12
+            ) {
+                result = createResultError(
+                    "INVALID_DATE_RANGE",
+                    "El mes o el año solicitado no es válido."
+                );
+            } else {
+                result = await withTimeout(
+                    getAvailableDays(
                         currentServiceId || currentSlug,
                         payload.resourceId || null,
-                        _safeTrim(payload.dateYMD || payload.dateYmd || ""),
-                        addOnIds
-                    )
-                    : getAvailableSlots(
-                        currentServiceId || currentSlug,
-                        payload.resourceId || null,
-                        _safeTrim(payload.dateYMD || payload.dateYmd || ""),
+                        year,
+                        month,
                         addOnIds
                     ),
-                UI?.FRONTEND_API_TIMEOUT_MS || 60000,
-                "getAvailableSlots"
+                    getTimeoutMs(),
+                    "getAvailableDays"
+                );
+            }
+        } else if (action === "slots") {
+            const dateYMD = _safeTrim(
+                payload.dateYMD || payload.dateYmd || ""
             );
+
+            if (!isValidYmd(dateYMD)) {
+                result = createResultError(
+                    "INVALID_DATE",
+                    "La fecha solicitada no es válida."
+                );
+            } else {
+                const getSlots = currentService && currentService.allowCombine
+                    ? getCertifiedDualSlots
+                    : getAvailableSlots;
+
+                result = await withTimeout(
+                    getSlots(
+                        currentServiceId || currentSlug,
+                        payload.resourceId || null,
+                        dateYMD,
+                        addOnIds
+                    ),
+                    getTimeoutMs(),
+                    "getAvailableSlots"
+                );
+            }
         } else {
             result = createResultError(
                 "INVALID_AVAILABILITY_REQUEST",
-                "Solicitud de disponibilidad no valida."
+                "Solicitud de disponibilidad no válida."
             );
         }
     } catch (error) {
         result = createResultError(
             "AVAILABILITY_FAILED",
-            error?.message || "No se pudo obtener disponibilidad."
+            error && error.message
+                ? error.message
+                : "No se pudo obtener disponibilidad."
         );
     }
 
@@ -191,12 +252,11 @@ async function handleAvailability(payload, reply) {
         {
             ...(result || createResultError(
                 "EMPTY_AVAILABILITY_RESPONSE",
-                "No se recibio disponibilidad."
+                "No se recibió disponibilidad."
             )),
             action,
             requestSequence: payload.requestSequence || 0
-        },
-        payload
+        }
     );
 }
 
@@ -208,9 +268,8 @@ async function handleSelection(payload, reply) {
             MESSAGE_TYPES.SELECT,
             createResultError(
                 "INVALID_SLOT",
-                "El horario seleccionado no es valido."
-            ),
-            payload
+                "El horario seleccionado no es válido."
+            )
         );
         return;
     }
@@ -221,12 +280,10 @@ async function handleSelection(payload, reply) {
                 currentServiceId || currentSlug,
                 start,
                 payload.resourceId || null,
-                Array.isArray(payload.addOnIds)
-                    ? payload.addOnIds
-                    : [],
+                normalizeIdList(payload.addOnIds),
                 null
             ),
-            UI?.FRONTEND_API_TIMEOUT_MS || 60000,
+            getTimeoutMs(),
             "resolveStaffForSlot"
         );
 
@@ -235,37 +292,38 @@ async function handleSelection(payload, reply) {
             result || createResultError(
                 "STAFF_RESOLVE_FAILED",
                 "No se pudo validar el profesional."
-            ),
-            payload
+            )
         );
     } catch (error) {
         reply(
             MESSAGE_TYPES.SELECT,
             createResultError(
                 "STAFF_RESOLVE_FAILED",
-                error?.message || "No se pudo validar el profesional."
-            ),
-            payload
+                error && error.message
+                    ? error.message
+                    : "No se pudo validar el profesional."
+            )
         );
     }
 }
 
 async function handleBooking(message, reply, traceId) {
     const payload = getPayload(message);
+    const nestedBooking = payload.bookingData;
     const bookingData =
-        payload.bookingData &&
-        typeof payload.bookingData === "object"
-            ? payload.bookingData
+        nestedBooking &&
+        typeof nestedBooking === "object" &&
+        !Array.isArray(nestedBooking)
+            ? nestedBooking
             : payload;
 
-    if (!bookingData || typeof bookingData !== "object") {
+    if (Object.keys(bookingData).length === 0) {
         reply(
             MESSAGE_TYPES.BOOK,
             createResultError(
                 "INVALID_BOOKING_PAYLOAD",
-                "Los datos de la reserva no son validos."
-            ),
-            message
+                "Faltan los datos de la reserva."
+            )
         );
         return;
     }
@@ -280,16 +338,16 @@ async function handleBooking(message, reply, traceId) {
     try {
         const result = await withTimeout(
             processDualBooking(requestPayload),
-            UI?.FRONTEND_API_TIMEOUT_MS || 60000,
+            getTimeoutMs(),
             "processDualBooking"
         );
 
         const bookingResult = result || createResultError(
             "EMPTY_BOOKING_RESPONSE",
-            "No se recibio respuesta de la reserva."
+            "No se recibió respuesta de la reserva."
         );
 
-        reply(MESSAGE_TYPES.BOOK, bookingResult, message);
+        reply(MESSAGE_TYPES.BOOK, bookingResult);
 
         if (bookingResult.status === "SUCCESS") {
             try {
@@ -306,15 +364,15 @@ async function handleBooking(message, reply, traceId) {
                     "[calendario-2] No se pudo abrir ConfirmacionReserva",
                     {
                         traceId,
-                        message: lightboxError?.message
+                        message: lightboxError && lightboxError.message
                     }
                 );
             }
         }
     } catch (error) {
         const timeout =
-            error?.code === "TIMEOUT" ||
-            String(error?.message || "")
+            (error && error.code === "TIMEOUT") ||
+            String(error && error.message || "")
                 .toUpperCase()
                 .includes("TIMEOUT");
 
@@ -323,10 +381,9 @@ async function handleBooking(message, reply, traceId) {
             createResultError(
                 timeout ? "BOOKING_TIMEOUT" : "BOOKING_FAILED",
                 timeout
-                    ? "La reserva esta tardando demasiado. Intentalo de nuevo."
+                    ? "La reserva está tardando demasiado. Comprueba su estado antes de volver a intentarlo."
                     : "No se pudo completar la reserva."
-            ),
-            message
+            )
         );
     }
 }
@@ -337,34 +394,47 @@ $w.onReady(async () => {
     const resolved = resolveServiceFromParams(params);
 
     if (!resolved) {
-        console.error("[calendario-2] Servicio no valido", { traceId });
+        console.error("[calendario-2] Servicio no válido", {
+            traceId,
+            hasServiceId: Boolean(params.serviceId),
+            hasSlug: Boolean(params.slug)
+        });
         return;
     }
 
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
 
-    const widget = $w("#htmlWidgetCalendario");
+    const widget = $w("#html1");
 
     if (
         !widget ||
         typeof widget.postMessage !== "function" ||
         typeof widget.onMessage !== "function"
     ) {
-        console.error("[calendario-2] Widget HTML no disponible", { traceId });
+        console.error("[calendario-2] Widget HTML no disponible", {
+            traceId,
+            widgetId: "#html1",
+            postMessage: typeof (widget && widget.postMessage),
+            onMessage: typeof (widget && widget.onMessage)
+        });
         return;
     }
 
     try {
         bridge = createWidgetBridge(widget, {
+            // Wix may report an empty origin for this site-owned HTML component.
+            allowOpaqueOrigin: true,
+
             onContextReady: async () => loadServiceContext(params),
 
+            // Requires widgetBridge F2 callback signature.
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 const payload = getPayload(message);
 
                 if (type === MESSAGE_TYPES.NAV) {
-                    await handleNavigation(payload);
+                    handleNavigation(payload);
                     return;
                 }
 
@@ -394,26 +464,30 @@ $w.onReady(async () => {
                 }
             },
 
-            onError: (error) => {
+            onError: (error, detail) => {
                 console.error(
-                    "[calendario-2] Error de comunicacion",
+                    "[calendario-2] Error de comunicación",
                     {
                         traceId,
-                        message: error?.message
+                        code: error && error.code,
+                        message: error && error.message,
+                        causeMessage: error && error.cause && error.cause.message,
+                        detail
                     }
                 );
             }
         });
 
         if (!bridge) {
-            throw new Error("No se pudo inicializar el bridge.");
+            throw new Error("No se pudo inicializar el puente.");
         }
     } catch (error) {
         console.error(
-            "[calendario-2] Error de inicializacion",
+            "[calendario-2] Error de inicialización",
             {
                 traceId,
-                message: error?.message
+                code: error && error.code,
+                message: error && error.message
             }
         );
     }

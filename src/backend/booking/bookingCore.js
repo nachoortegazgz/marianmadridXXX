@@ -1,69 +1,68 @@
 /*
 MODULE: backend/booking/bookingCore.js
-VERSION: v5009-FISCAL-V20.2-CORE
-BASE: v5009-FISCAL-V20.1 + Alineacion con bookingSaga v5009-FISCAL-V20.3
+VERSION: v5010.1-BOOKINGS-ALIGN
+BASE: v5009-FISCAL-V20.2-CORE + Wix Bookings API alignment pass
 RESPONSIBILITY: Capa de acceso y primitivas atomicas para reservas.
 STANDARDS: ASCII only. No Node builtins.
 
-FIXES APLICADOS v5009-FISCAL-V20.2:
+FIXES APLICADOS v5010.1-BOOKINGS-ALIGN:
+  - CORE-08: cancelBookingElevated deja de ser un proxy plano y pasa a ser
+             un wrapper que EXIGE revision (parametro requerido por la API
+             de Wix Bookings: "the current revision must be specified when
+             updating the booking"). Sin revision, la compensacion de la
+             saga fallaba con HTTP 428 (Failed Precondition) y dejaba
+             reservas huerfanas. Firma nueva:
+                cancelBookingElevated(bookingId, { revision, suppressAuth? })
+             Si revision no es entero positivo, lanza BookingError
+             INVALID_PAYLOAD antes de llamar a la API.
+  - CORE-09: _forceStaffInPristineSlot y _projectWriterSlotFromAvailability
+             YA NO inyectan addOnIds/selectedAddOns DENTRO del slot.
+             La API de Wix Bookings espera los add-ons en el campo
+             bookedAddOns del body de createBooking:
+                bookings.createBooking({
+                  bookedEntity: { slot: {...} },
+                  bookedAddOns: [{ addOnId: "..." }, ...],
+                  ...
+                })
+             Inyectar add-ons dentro del slot los ignoraba silenciosamente.
+  - CORE-10: nuevo helper exportado _buildBookedAddOns(addOnIds) que
+             devuelve [{ addOnId }, ...] listo para el body. Consumidor
+             previsto: bookingSaga.js (en su proxima entrega). El lector
+             _extractAddonIdsFromSlot se mantiene para compatibilidad.
+  - CORE-11: header y changelog actualizados. Contrato de cancelBooking
+             documentado explicitamente.
+
+FIXES APLICADOS v5009-FISCAL-V20.2 (heredados):
   - CORE-01: _extractResourceIdsFromSlot acepta resourceTypeId,
              resourceType.id, resourceType._id y typeId. Paridad 1:1 con
              reservas.web._getResourceIdsFromSlot. Extrae tambien
              resource.resourceId. Sin este fix, _projectCertifiedSlot
              devolvia availableResources: [] con la variante anidada de Wix.
-  - CORE-02: _forceStaffInPristineSlot PRESERVA addOnIds / selectedAddOns
-             en el slot final. Antes los addOnOptions detectados por bookingSaga
-             se perdia antes de createBooking (precio/duracion incorrectos).
+  - CORE-02: (derogado por CORE-09) el slot ya no transporta addOnIds.
   - CORE-03: _projectWriterSlotFromAvailability exige scheduleId GUID
-             valido (cascada projected -> slot -> slot.slot). Devuelve null
-             si no hay scheduleId util, en vez de proyectar scheduleId: "".
+             valido (cascada projected -> slot -> slot.slot).
   - CORE-04: _projectCertifiedSlot valida locationId contra
              SDK_CONFIG.LOCATION_ID. Si el slot trae otra ubicacion,
-             devuelve null (fail-fast) en vez de sustituirla en silencio.
-             locationId resultante debe ser GUID valido.
-  - CORE-05: Huella de pairToken CANONICA compartida.
-             _buildPairFingerprint + _buildPairTokenDeterministic son la
-             UNICA fuente de verdad. reservas.web.js y bookingSaga.js deben
-             importarlas (ver parches de consumo mas abajo). Incluye los 8
-             campos exigidos: serviceId, linkedPhases, dateYmd, f1Start,
-             f1End, f2Start, f2End, resourceId.
-             _generatePairToken(traceId) queda SOLO como legacy no
-             determinista (no usar para correlacion dual).
-  - CORE-06: confirmOrDeclineBookingElevated traduce paymentStatus del
-             SSOT espanol (IMPAGADO, NO_PAGADO, PAGADO...) al enum nativo
-             de Wix (NOT_PAID, PAID...) segun BIBLIA 3.2.1.
-             Resuelve el riesgo SAGA-05: la saga envia PAYMENT_STATUS.NOT_PAID
-             ("IMPAGADO") y Wix solo acepta el enum nativo ingles.
-             Valores ingleses pasan sin cambios (back-compat total).
-  - CORE-07: Constantes CONCURRENCY V20 canonicas (BIBLIA 3.2.1 filas
-             15-17: MS_TTL_MUTEX, MS_LATIDO, MS_TTL_MUTEX_ASIENTO).
-             v5010.4 FASE 2: internalConfig ya solo expone los nombres V20;
-             las cascadas de transicion legacy se eliminaron. TRANSACTION_
-             POLL_BASE_MS / TRANSACTION_MAX_WAIT_MS se conservan porque la
-             norma no documenta equivalente V20 (grep BIBLIA/SSOT1 vacio).
-             _persistBooking y _rankResourcesByLoad toleran alias de estado
-             CONFIRMADO / PENDIENTE_PAGO / CANCELADO junto a los nativos
-             ingleses (esos alias son del DOMINIO Wix/CitasF2, no del SSOT).
+             devuelve null (fail-fast).
+  - CORE-05: Huella de pairToken canonica compartida (_buildPairFingerprint
+             + _buildPairTokenDeterministic desde bookingUtils).
+  - CORE-06: confirmOrDeclineBookingElevated traduce paymentStatus del SSOT
+             espanol al enum nativo Wix.
+  - CORE-07: Constantes CONCURRENCY V20 canonicas.
 
 HISTORIAL (heredado):
-  v5009-FISCAL-V20.1 | Sin renombrados funcionales (esquema corto CitasF2).
+  v5009-FISCAL-V20.1 | Sin renombrados funcionales.
   v5008.6 | 2026-09-20 | Alineacion final: FIX-32, FIX-33, FIX-43.
   v5008.5 | 2026-09-19 | COHERENCIA scheduleId: CORE-16, CORE-17.
-  v5008.4 | 2026-09-19 | Date range, scheduleId obligatorio, cache validaciones.
+  v5008.4 | 2026-09-19 | Date range, scheduleId obligatorio, cache.
   v5008.3 | 2026-09-19 | Restauracion de exports faltantes.
   v5008.2 | 2026-09-15 | Aligned + dead code removed.
 =============================================================================
 */
 
 import { bookings } from "@wix/bookings";
-// AUDIT-FIX v5010.3 (TAREA 4): import ecom migrado al SDK unificado V2
-// "@wix/ecom" (cero legacy). Firmas equivalentes:
-// checkout.createCheckout(request) y checkout.getCheckoutUrl(id, opts).
 import { checkout } from "@wix/ecom";
 import { auth } from "@wix/essentials";
-// EXCEPCION DATA API (APENDICE C de la BIBLIA): lectura/escritura CMS
-// server-side via wixData con suppressAuth; ver apendice para el porque
-// no se migra a datasets.query('@wix/data').queryDataItems().
 import wixData from "backend/dataLegacyAdapter";
 import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
@@ -95,27 +94,19 @@ import {
 import {
     computeGapMinutes,
     getResourceIdsFromSlot,
-    // v5010.4 (FASE 2): huella canonica definida en bookingUtils (capa de
-    // utilidades puras, segun precedencia mmUtils > bookingUtils > core > web).
-    // Evita el ciclo bookingUtils -> bookingCore que se habia introducido.
     _buildPairFingerprint,
 } from "backend/booking/bookingUtils";
 
 const log = logger;
 
-// FIX-32: STAFF_RESOURCE_TYPE_ID via SSOT.
 const STAFF_RESOURCE_TYPE_ID = API.STAFF_RESOURCE_TYPE_ID;
 
-// v5010.4 (FASE 2): unica definicion de la huella en bookingUtils; aqui solo
-// se REEXPORTA la superficie publica historica (sin duplicar logica) y se
-// define el token determinista canonico sobre esa huella (CORE-05).
 export { _buildPairFingerprint };
 
-// CORE-07:Ubicacion configurada, normalizada una sola vez.
 const CONFIGURED_LOCATION_ID = _safeTrim(SDK_CONFIG?.LOCATION_ID);
 
 // =============================================================================
-// BLOQUE 1 - CODIGOS DE ERROR (25 codigos)
+// BLOQUE 1 - CODIGOS DE ERROR
 // =============================================================================
 
 export const ERROR_CODES = Object.freeze({
@@ -150,24 +141,18 @@ export const ERROR_CODES = Object.freeze({
 // =============================================================================
 // BLOQUE 2 - ELEVATED PROXIES (Bookings V2 + eCommerce)
 // =============================================================================
-// v5010.6: superficie reducida a los proxies con consumidor real.
-//   cancelBookingElevated -> bookingSaga (compensacion SAGA-06) + crons.js.
-//   confirmOrDecline...   -> bookingSaga (paso ConfirmPresencial, CORE-06).
-//   createCheckout/getCheckoutUrl -> bookingSaga (flujo ONLINE).
-// createBookingElevated y rescheduleBookingElevated eliminados: cero
-// consumidores en src/ y tools/. La creacion usa elevacion selectiva
-// (bookingSaga._createBookingWithSelectiveElevation, FIX-37), que solo
-// eleva bajo ACCESS_DENIED; el reprogramado no tiene flujo activo.
+// CORE-08: cancelBookingElevated deja de ser un proxy plano. La API de
+// Wix Bookings exige el parametro revision para prevenir conflictos.
+// El wrapper valida el contrato antes de llamar a la API.
+//
+// CORE-06: confirmOrDeclineBookingElevated traduce el paymentStatus del
+// SSOT espanol (IMPAGADO, NO_PAGADO, PAGADO...) al enum nativo de Wix.
 
-export const cancelBookingElevated = auth.elevate(bookings.cancelBooking);
 export const createCheckoutElevated = auth.elevate(checkout.createCheckout);
 export const getCheckoutUrlElevated = auth.elevate(checkout.getCheckoutUrl);
 
-// CORE-06: Mapa paymentStatus SSOT espanol -> enum nativo Wix (BIBLIA 3.2.1).
-// Los valores nativos ingleses NO aparecen como clave: pasan sin traduccion,
-// lo que garantiza compatibilidad total con consumidores existentes.
+// CORE-06: Mapa paymentStatus SSOT espanol -> enum nativo Wix.
 const WIX_NATIVE_PAYMENT_STATUS = Object.freeze({
-    // Values already canonical EN (Wix Bookings). Identity pass-through.
     UNDEFINED: "UNDEFINED",
     NOT_PAID: "NOT_PAID",
     PENDING_PAYMENT: "PENDING_PAYMENT",
@@ -176,7 +161,6 @@ const WIX_NATIVE_PAYMENT_STATUS = Object.freeze({
     REFUNDED: "REFUNDED",
     PARTIALLY_REFUNDED: "PARTIALLY_REFUNDED",
     EXEMPT: "EXEMPT",
-    // Optional UI labels (ES) -> Wix native EN (never stored in CMS)
     IMPAGADO: "NOT_PAID",
     NO_PAGADO: "NOT_PAID",
     PAGADO: "PAID",
@@ -192,12 +176,16 @@ function _toWixNativePaymentStatus(value) {
 }
 
 const _confirmOrDeclineElevatedRaw = auth.elevate(bookings.confirmOrDeclineBooking);
+const _cancelBookingElevatedRaw = auth.elevate(bookings.cancelBooking);
 
 /**
- * CORE-06: Wrapper elevado que traduce el paymentStatus del SSOT (espanol)
- * al enum nativo que acepta Wix Bookings. bookingSaga v20.3 envia
- * PAYMENT_STATUS.NOT_PAID; sin esta traduccion Wix rechaza la
- * confirmacion presencial.
+ * CORE-06: wrapper elevado que traduce el paymentStatus del SSOT (espanol)
+ * al enum nativo que acepta Wix Bookings.
+ *
+ * IMPORTANTE (Wix Bookings API): no llamar a este metodo cuando se usa un
+ * checkout de Wix eCommerce. En ese caso Wix Bookings actualiza el estado
+ * automaticamente segun el paymentStatus de la orden. Ver bookingSaga para
+ * la logica de flujo.
  *
  * Contrato preservado: (bookingId, options) -> respuesta nativa elevada.
  */
@@ -219,7 +207,52 @@ export async function confirmOrDeclineBookingElevated(bookingId, options) {
     return _confirmOrDeclineElevatedRaw(bookingId, normalizedOptions);
 }
 
-// Back-compat: some modules historically imported logger from this file.
+/**
+ * CORE-08: wrapper elevado que EXIGE revision en las opciones.
+ *
+ * Contrato Wix Bookings (cancelBooking):
+ *   "To prevent conflicting changes, the current revision must be specified
+ *    when cancelling the booking."
+ *
+ * Firma:
+ *   cancelBookingElevated(bookingId, { revision, suppressAuth? })
+ *
+ * Si revision no es entero positivo, lanza BookingError INVALID_PAYLOAD
+ * SIN llamar a la API. El llamador (bookingSaga._compensateCreatedBookings)
+ * debe propagar el revision persistido en CitasF2.
+ */
+export async function cancelBookingElevated(bookingId, options = {}) {
+    const cleanId = _safeTrim(bookingId);
+    if (!cleanId || !_looksLikeGuid(cleanId)) {
+        throw new BookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "cancelBooking: bookingId must be a valid GUID",
+            { bookingId: cleanId }
+        );
+    }
+
+    const revisionRaw = options?.revision;
+    const revision = Number(revisionRaw);
+
+    if (!Number.isFinite(revision) || revision <= 0 || !Number.isInteger(revision)) {
+        throw new BookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "cancelBooking: revision is required and must be a positive integer " +
+            "(Wix Bookings contract). Got: " + String(revisionRaw),
+            { bookingId: cleanId, revisionRaw }
+        );
+    }
+
+    const normalizedOptions = Object.assign({}, options, { revision });
+
+    log.info("CORE-08: cancelling booking with revision", {
+        bookingId: cleanId,
+        revision,
+    });
+
+    return _cancelBookingElevatedRaw(cleanId, normalizedOptions);
+}
+
 export { logger };
 
 // =============================================================================
@@ -293,7 +326,7 @@ export function _handleError(error, context, traceId, logFn) {
 }
 
 // =============================================================================
-// BLOQUE 5 - RESOLUCION DE SCHEDULEID (FALLBACK CONTROLADO)
+// BLOQUE 5 - RESOLUCION DE SCHEDULEID
 // =============================================================================
 
 async function _resolveScheduleIdByResourceId(resourceId) {
@@ -318,16 +351,19 @@ export async function _resolveScheduleIdForResource(resourceId, sourceSlot) {
 }
 
 // =============================================================================
-// BLOQUE 6 - NORMALIZACION DE SLOTS PARA WRITER V2 (CORE-02, CORE-04)
+// BLOQUE 6 - NORMALIZACION DE SLOTS PARA WRITER V2
 // =============================================================================
 
 /**
- * CORE-02: Extraccion tolerante de addOnOptions desde el slot entrante.
+ * CORE-10: extraccion tolerante de addOnIds desde el slot entrante.
  * Fuentes aceptadas (por orden): slot.addOnIds, slot.selectedAddOns,
- * slot.customerChoices.addOnIds (forma usada en disponibilidad).
+ * slot.customerChoices.addOnIds.
  * Solo se conservan GUIDs validos, deduplicados.
+ *
+ * NOTA: los add-ons NO se inyectan de vuelta al slot. Ver CORE-09.
+ * El consumidor los pasa por _buildBookedAddOns antes del createBooking.
  */
-function _extractAddonIdsFromSlot(slot) {
+export function _extractAddonIdsFromSlot(slot) {
     const candidates = [].concat(
         Array.isArray(slot?.addOnIds) ? slot.addOnIds : [],
         Array.isArray(slot?.selectedAddOns) ? slot.selectedAddOns : [],
@@ -339,6 +375,22 @@ function _extractAddonIdsFromSlot(slot) {
         .filter(function (id) { return _looksLikeGuid(id); });
 
     return Array.from(new Set(clean));
+}
+
+/**
+ * CORE-10: construye el campo bookedAddOns para el body de createBooking.
+ * Contrato Wix Bookings: bookedAddOns es un array de { addOnId } en el
+ * nivel RAIZ del body, NO dentro de bookedEntity.slot.
+ *
+ * @param {string[]} addOnIds GUIDs nativos de los add-ons seleccionados.
+ * @returns {Array<{addOnId: string}>}
+ */
+export function _buildBookedAddOns(addOnIds) {
+    if (!Array.isArray(addOnIds) || addOnIds.length === 0) return [];
+    return addOnIds
+        .map(function (id) { return _safeTrim(id); })
+        .filter(function (id) { return _looksLikeGuid(id); })
+        .map(function (id) { return { addOnId: id }; });
 }
 
 export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverride, defaultDurationMinutes) {
@@ -405,9 +457,6 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         return null;
     }
 
-    // CORE-04: validacion de ubicacion entrante contra la configurada.
-    // Si el slot trae OTRA ubicacion, fail-fast: nunca se sustituye en
-    // silencio (evitaria crear la reserva en un local equivocado).
     const incomingLocationId = _safeTrim(slot.location?.id);
     if (
         incomingLocationId &&
@@ -431,12 +480,13 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         return null;
     }
 
-    // BIBLIA 2.2.1 fila 8: creacion SIEMPRE con OWNER_BUSINESS.
     let locationType = _safeTrim(SDK_CONFIG?.LOCATION_TYPES?.BOOKINGS_WRITER) || "OWNER_BUSINESS";
     if (locationType === "BUSINESS") locationType = "OWNER_BUSINESS";
     const timezone = _safeTrim(SDK_CONFIG?.TZ) || "Europe/Madrid";
 
-    const result = {
+    // CORE-09: NO se inyectan addOnIds ni selectedAddOns dentro del slot.
+    // Los add-ons viajan en bookingBody.bookedAddOns (ver _buildBookedAddOns).
+    return {
         serviceId,
         scheduleId,
         startDate: startDate.toISOString(),
@@ -445,17 +495,6 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         resource: { id: resourceIdClean },
         location: { id: locationId, locationType },
     };
-
-    // CORE-02: preservar addOnOptions para createBooking. Se emiten ambas claves
-    // porque bookingSaga v20.3 inyecta addOnIds + selectedAddOns y el
-    // contrato del Writer V2 ha usado historicamente las dos formas.
-    const addOnIds = _extractAddonIdsFromSlot(slot);
-    if (addOnIds.length > 0) {
-        result.addOnIds = addOnIds.slice();
-        result.selectedAddOns = addOnIds.slice();
-    }
-
-    return result;
 }
 
 // =============================================================================
@@ -467,19 +506,14 @@ export function _extractCheckoutId(checkoutSession) {
 }
 
 // =============================================================================
-// BLOQUE 8 - MUTEX LOCKS (SlotLocks) - CORE-07 renombrado V20
+// BLOQUE 8 - MUTEX LOCKS (SlotLocks) - CORE-07
 // =============================================================================
 
-// CORE-07 / v5010.4 (FASE 2): BIBLIA 3.2.1 f15 renombro MUTEX_TTL_MS ->
-// MS_TTL_MUTEX y el SSOT (internalConfig) ya solo expone el nombre V20, por
-// lo que la cascada de transicion se elimina (cero codigo de fallback inutil).
 const MUTEX_TTL_MS = Number(CONCURRENCY?.MS_TTL_MUTEX);
 if (!Number.isFinite(MUTEX_TTL_MS) || MUTEX_TTL_MS <= 0) {
     throw new Error("MS_TTL_MUTEX must be positive");
 }
-// FASE4 (ADR-05): SlotLocks absorbida en ControlOperativo (discriminador
-// controlType=SLOT_LOCK). Las escrituras purgan el payload de documento
-// fisico antiguo y persisten el esquema canonico de ControlOperativo.
+
 const LOCKS_COL = OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO;
 
 export function _buildSlotLockControl(slotClave, lockOwnerId, ttlMs, existing) {
@@ -526,7 +560,6 @@ function _isDuplicateItemError(error) {
 }
 
 function _buildLockDocument(slotClave, lockOwnerId, ttlMs, existing) {
-    // FASE4: delegacion al constructor canonico ControlOperativo/SLOT_LOCK.
     return _buildSlotLockControl(slotClave, lockOwnerId, ttlMs, existing);
 }
 
@@ -616,17 +649,11 @@ export function _buildLockKeys(phases, resourceId) {
 }
 
 // =============================================================================
-// BLOQUE 10 - TRANSACCIONES IDEMPOTENTES (BookingTransactions) - CORE-07
+// BLOQUE 10 - TRANSACCIONES IDEMPOTENTES (BookingTransactions)
 // =============================================================================
 
-// FASE4 (ADR-05): BookingTransactions absorbida en ControlOperativo
-// (controlType=BOOKING_TX).
 const TRANSACTIONS_COL = OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO;
 
-// CORE-07: tolerancia al renombrado V20 (BIBLIA 3.2.1).
-// SIN EQUIVALENTE V20 DOCUMENTADO en BIBLIA 3.2.1 para estas dos claves
-// (grep verifico: MS_SONDEO_TRANSACCION / MS_ESPERA_MAX_TRANSACCION no
-// existen en la norma). Se mantiene el nombre actual como canonico del SSOT.
 const TRANSACTION_POLL_BASE_MS = Number(CONCURRENCY?.TRANSACTION_POLL_BASE_MS) || 250;
 const TRANSACTION_MAX_WAIT_MS = Number(CONCURRENCY?.TRANSACTION_MAX_WAIT_MS) || 3000;
 
@@ -728,16 +755,11 @@ export async function _failTransaction(pairToken, errorMessage) {
 }
 
 // =============================================================================
-// BLOQUE 11 - PERSISTENCIA EN CITAS_F2 (CORE-07: alias de estado)
+// BLOQUE 11 - PERSISTENCIA EN CITAS_F2
 // =============================================================================
 
 const CITAS_COL = BUSINESS_COLLECTIONS.CITAS_F2;
 
-// CORE-07: statuses use SSOT EN = Wix native. No dual alias lists.
-// FASE2 (ADR-06): the CitasF2 PHYSICAL canonical field is bookingStatus
-// (BOOKING_FIELDS.STATUS). The legacy "status" key is accepted on READ only
-// as a transitional fallback and is NEVER written to the document anymore.
-// Zero-fallback-on-write rule (MATRIZ H / transversal).
 export async function _persistBooking(params, traceId) {
     const p = params || {};
     const bookingId = p.bookingId;
@@ -771,9 +793,6 @@ export async function _persistBooking(params, traceId) {
         p.paymentStatus || p.meta?.paymentStatus || PAYMENT_STATUS.NOT_PAID
     ).toUpperCase();
 
-    // CORE-07: explicit status wins. Defaults use Wix-native SSOT EN only.
-    // FASE2 (ADR-06): canonical bookingStatus is read FIRST; legacy p.status
-    // remains as transitional READ fallback only (EOL 31/12/2026).
     const statusCita = String(
         p.bookingStatus ||
         p.status ||
@@ -805,8 +824,6 @@ export async function _persistBooking(params, traceId) {
         endDate: endDateObj,
         dateYmd,
         bookingType: normalizeBookingType(p.tipo || p.bookingType),
-        // FASE2 (ADR-06): write ONLY the canonical physical field. The legacy
-        // "status" key is no longer persisted; reads tolerate it until EOL.
         [BOOKING_FIELDS.STATUS]: statusCita,
         paymentStatus: metaPago,
         meta: normalizedMeta,
@@ -894,30 +911,16 @@ export async function _updateCitaSafe(bookingId, updater, traceId, operation) {
 // BLOQUE 15 - EXTRACCION DE RESOURCEIDS DESDE SLOTS (CORE-01)
 // =============================================================================
 
-/**
- * CORE-01: Paridad 1:1 con reservas.web._getResourceIdsFromSlot.
- * Acepta las cuatro variantes de tipo de recurso que Wix devuelve segun
- * version de API y forma del slot:
- *   group.resourceTypeId | group.resourceType.id | group.resourceType._id |
- *   group.typeId
- * Y las tres variantes de id de recurso:
- *   resource.id | resource._id | resource.resourceId
- * Fallback final: resource directo o resourceId plano en el slot.
- */
 export function _extractResourceIdsFromSlot(slot) {
-    // v5010.4 (FASE 2): delegacion total en bookingUtils.getResourceIdsFromSlot
-    // (unica implementacion; reservas.web importa el mismo helper). Cero 1:1.
     return getResourceIdsFromSlot(slot, STAFF_RESOURCE_TYPE_ID);
 }
 
 // =============================================================================
-// BLOQUE 17 - VERIFICACION DE CONTIGUIDAD/GAP ENTRE SLOTS
+// BLOQUE 17 - VERIFICACION DE CONTIGUIDAD/GAP
 // =============================================================================
 
 export function _areSlotsContiguous(slot1, slot2, maxGapMinutes) {
     if (!slot1 || !slot2) return false;
-    // SSOT: cuando el llamador no fija limite explicito, la tolerancia canonica
-    // es SLOT_SEARCH.MINUTOS_TOLERANCIA (BIBLIA 3.2.1 f12), no un magic number.
     const fallbackTolerance = Number(SLOT_SEARCH?.MINUTOS_TOLERANCIA);
     const maxGap = maxGapMinutes == null ?
         (Number.isFinite(fallbackTolerance) ? fallbackTolerance : 120) :
@@ -940,14 +943,9 @@ export function _areSlotsContiguous(slot1, slot2, maxGapMinutes) {
 }
 
 // =============================================================================
-// BLOQUE 18 - PROYECCION DE SLOTS CERTIFICADOS Y WRITER (CORE-03, CORE-04)
+// BLOQUE 18 - PROYECCION DE SLOTS CERTIFICADOS Y WRITER
 // =============================================================================
 
-/**
- * CORE-04: locationId validado contra SDK_CONFIG.LOCATION_ID.
- * - Slot con otra ubicacion  -> null (fail-fast, nunca sustitucion silenciosa).
- * - Sin ubicacion util o sin GUID -> null.
- */
 export function _projectCertifiedSlot(slot, resourceId) {
     if (!slot || typeof slot !== "object") return null;
 
@@ -967,7 +965,6 @@ export function _projectCertifiedSlot(slot, resourceId) {
 
     if (!startDateUtc || !endDateUtc || endDateUtc.getTime() <= startDateUtc.getTime()) return null;
 
-    // CORE-04: validacion de ubicacion.
     const slotLocationId = _safeTrim(slot.location?.id);
 
     if (
@@ -1012,9 +1009,8 @@ export function _projectCertifiedSlot(slot, resourceId) {
 }
 
 /**
- * CORE-03: el Writer V2 exige scheduleId GUID valido (BIBLIA 2.2.1 fila 4).
- * Cascada: projected -> slot -> slot.slot. Si no hay scheduleId util,
- * devuelve null EN VEZ de proyectar scheduleId: "".
+ * CORE-09: el slot del Writer V2 NO lleva add-ons. Los add-ons se pasan
+ * a createBooking via _buildBookedAddOns en el body raiz.
  */
 export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) {
     const projected = _projectCertifiedSlot(slot, resourceId);
@@ -1040,7 +1036,7 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
     let writerLocationType = _safeTrim(SDK_CONFIG?.LOCATION_TYPES?.BOOKINGS_WRITER);
     if (writerLocationType === "BUSINESS" || !writerLocationType) writerLocationType = "OWNER_BUSINESS";
 
-    const writerSlot = {
+    return {
         serviceId: finalServiceId,
         scheduleId,
         startDate: projected.startDate,
@@ -1054,53 +1050,20 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
             locationType: writerLocationType,
         },
     };
-
-    // CORE-02: propagar addOnOptions si el slot certificado los porta.
-    const addOnIds = _extractAddonIdsFromSlot(slot);
-    if (addOnIds.length > 0) {
-        writerSlot.addOnIds = addOnIds.slice();
-        writerSlot.selectedAddOns = addOnIds.slice();
-    }
-
-    return writerSlot;
 }
 
 // =============================================================================
 // BLOQUE 20 - PAIR TOKEN CANONICO COMPARTIDO (CORE-05)
 // =============================================================================
 
-/**
- * CORE-05: UNICA fuente de verdad de la huella del par dual.
- *
- * v5010.4 (FASE 2): la definicion canonica vive en bookingUtils.js (capa de
- * utilidades puras; precedencia mmUtils > bookingUtils > core > web). Este
- * modulo la importa y la reexporta como superficie publica historica, sin
- * duplicar logica y sin ciclo de imports.
- *
- * IMPORTANTE: esta huella debe ser IDENTICA en los tres puntos donde se
- * genera o consume un pairToken:
- *   1. reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
- *   2. bookingSaga._resolveUnifiedPairToken          (consumidor/reemisor)
- *   3. DualSlotCache.pairToken                       (persistencia)
- *
- * Cualquier cambio en el orden o contenido de los campos rompe la
- * correlacion y la idempotencia. Los 8 campos son obligatorios por
- * contrato (los opcionales se serializan como cadena vacia).
- */
 export function _buildPairTokenDeterministic(input) {
     return _hashKey(_buildPairFingerprint(input || {}));
 }
 
 // =============================================================================
-// BLOQUE 21 - RANKING DE RECURSOS POR CARGA (CORE-07)
+// BLOQUE 21 - RANKING DE RECURSOS POR CARGA
 // =============================================================================
 
-// CORE-07 v5010.5: unico alias de dominio permitido (grafia del SSOT
-// espanol; BIBLIA 3.2.1). El equivalente en ingles ("CANCELED") NO es un
-// alias aqui: los ESTADOS de reserva ya estan cubiertos por
-// INACTIVE_BOOKING_STATUSES (lista canonica: CANCELLED, DECLINED, REJECTED,
-// NOSHOW). En cambio, los PAGOS no tienen enum canonicode cancelacion en
-// Payments ignored for staff load ranking (Wix-native SSOT only).
 export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
     const input = Array.isArray(resourceIds) ?
         Array.from(new Set(resourceIds.map((id) => _safeTrim(id)).filter(_looksLikeGuid))) : [];
@@ -1119,8 +1082,6 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
         firstIndex: index,
     }]));
 
-    // CORE-07: defensa ante INACTIVE_BOOKING_STATUSES ausente o no-array
-    // (p. ej. durante la migracion a ESTADOS_CITA_INACTIVOS).
     const inactiveList = Array.isArray(INACTIVE_BOOKING_STATUSES) ?
         INACTIVE_BOOKING_STATUSES.map((s) => String(s || "").toUpperCase()).filter(Boolean) :
         [];
@@ -1145,12 +1106,10 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
                 const resourceId = _safeTrim(item?.resourceId);
                 if (!loads[resourceId]) continue;
 
-                // CORE-07: tolerancia bookingStatus (canonico V20) || status.
                 const status = String(item?.bookingStatus || item?.status || "").toUpperCase();
                 const paymentStatus = String(item?.paymentStatus || "").toUpperCase();
 
-                const cancelled =
-                    inactiveList.indexOf(status) >= 0;
+                const cancelled = inactiveList.indexOf(status) >= 0;
                 const ignoredPayment =
                     paymentStatus === String(PAYMENT_STATUS.REFUNDED).toUpperCase() ||
                     paymentStatus === String(PAYMENT_STATUS.PARTIALLY_REFUNDED).toUpperCase();
