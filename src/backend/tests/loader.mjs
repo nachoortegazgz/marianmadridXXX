@@ -161,6 +161,8 @@ export const media = fnProxy;
 export const crypto = fnProxy;
 export const members = { getCurrentMember: async () => null };
 export const secrets = { getSecretValue: async () => "mock-secret" };
+// auth.elevate (@wix/essentials): identidad, igual que elevate (ver abajo).
+export const auth = { elevate: (fn) => fn };
 // Named SDK exports imported by backend code (offline stubs):
 export const availabilityTimeSlots = fnProxy;
 export const bookings = fnProxy;

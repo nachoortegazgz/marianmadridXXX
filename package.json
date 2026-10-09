@@ -26,6 +26,7 @@
   "scripts": {
     "postinstall": "wix sync-types",
     "dev": "wix dev",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --experimental-loader ./src/backend/tests/loader.mjs --test src/backend/tests/*.test.mjs"
   }
 }
