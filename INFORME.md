@@ -76,3 +76,14 @@ Confirmado por lectura completa de los 9 `.web.js`: **el 100% de los exports inv
 ## 9. Pendiente inmediato recomendado
 
 De mayor a menor relación beneficio/riesgo: **(1)** borrar `permissions.json`, **(2)** cablear script `test`, **(3)** migrar `marianAssistant.web.js`. Los tres son reversibles, no tocan lógica fiscal y no añaden código nuevo de peso. El split de god files (Fase 4) es el único bloque que requiere inversión previa en tests y debe tratarse como proyecto aparte.
+
+## 10. Fase 2 aplicada (rama `fix/critical-security`)
+
+Estado real tras ejecutar, verificado con `node --check` y `npm test`:
+
+- **`permissions.json`**: ya corregido por otra vía antes de iniciar esta fase (commit `acec436` en `main`, ya incorporado por fast-forward). Pasó de wildcard abierto a `anonymous:false` por defecto, con allowlist explícita (`reservas.web.js`, `horario.web.js`) para los dos únicos flujos que de verdad necesitan acceso anónimo (selección de slots públicos, fichaje). **No se ha tocado de nuevo** — el punto 1 del §9 queda sin efecto porque ya estaba resuelto.
+- **`marianAssistant.web.js`**: migrado de `wix-secrets-backend` (`getSecret`) a `@wix/secrets` (`secrets.getSecretValue`), mismo patrón ya usado en `cajas.web.js`/`events.js`/`fiscalDocuments.web.js`/`inventario.web.js`/`securityEngine.js`. Único punto de uso, cambio de 2 líneas. **Cerrado.**
+- **Script `test`**: cableado a `node --experimental-loader ./src/backend/tests/loader.mjs --test src/backend/tests/*.test.mjs`. **Corrección sobre el plan original**: la idea inicial de "1 línea sin riesgo" era incompleta — los test `.mjs` usan especificadores Velo (`backend/x`) que no resuelven bajo Node plano; el repo ya traía un loader ESM a medida (`src/backend/tests/loader.mjs`) hecho exactamente para esto, pero nadie lo había conectado. Al activarlo salió un mock desactualizado (`@wix/essentials` no exportaba `auth`, remanente de antes de migrar `elevate`→`auth.elevate`) — corregido en el propio loader (archivo de test, no toca código de producción).
+- **Resultado real de `npm test` con el fix aplicado**: 40 tests, 22 pasan, 18 fallan. De los 6 ficheros de test, 4 cargan y ejecutan (`controlOperativo.hooks`, `data.hooks`, `fiscalAggregator.read`, `unit.ssot.v5011`); 2 siguen sin cargar (`crons.jobsConfigParity.test.mjs`, `dto.whitelist.test.mjs`) por el mismo motivo: `backend/internalConfig` ya no exporta `MAPA_STAFF_FIELDS` que esos tests importan. Las 18 fallas (13 aserciones + 2 ficheros + 3 de `unit.ssot.v5011`: enums de booking, colecciones SSOT, `EU_VAT_PREFIXES`) son **drift real entre tests y el SSOT actual tras los refactors previos**, no artefactos de este cableado. **No se investigan ni corrigen en esta fase** — requieren decidir si el test está obsoleto o si el código perdió algo; eso es trabajo de Fase 3 (caracterización), no un "crítico de bajo riesgo".
+
+**Commit único de esta fase** (3 ficheros, 6 líneas): `fix/critical-security`.
