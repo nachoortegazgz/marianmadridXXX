@@ -527,7 +527,7 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         const startUtc = getUtcDateFromMadridLocal(localStartDate);
         if (!startUtc) return null;
         const durationMin = Number(defaultDurationMinutes || (CONCURRENCY && CONCURRENCY.DEFAULTDURATIONMIN) || 30);
-        localEndDate = getMadridLocalStringNoZ(new Date(startUtc.getTime() + durationMin  60  1000));
+        localEndDate = getMadridLocalStringNoZ(new Date(startUtc.getTime() + exposureDuration  60  1000));
     }
 
     const startDate = getUtcDateFromMadridLocal(localStartDate);
