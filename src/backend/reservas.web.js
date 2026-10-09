@@ -1,6 +1,3 @@
-Aquí tienes el módulo `backend/reservas.web.js` íntegro y corregido. Se han restaurado todos los operadores, identificadores y sintaxis corrupta por el copy-paste, manteniendo la lógica exacta de la versión v5010.1 + diagnósticos.
-
-```javascript
 /*
 ============================================================================
 FILE: backend/reservas.web.js
@@ -15,7 +12,7 @@ FIXES APLICADOS v5010.2-SYNTAX-RECOVERY:
     BUSINESS_COLLECTIONS, SDK_CONFIG, STAFF_DEFAULT_NAME,
     STAFF_RESOURCE_TYPE_ID, _safeTrim, _looksLikeGuid, etc.
   - Template literals restaurados: `${ymd}T00:00:00`
-  - Comentarios multilinea restaurados: /* ... */
+  - Comentarios multilinea restaurados: 
   - Arrow functions restauradas: () => en lugar de () = >
   - Catch vacios restaurados con parametro: catch (_) {}
   - Todas las referencias validadas contra imports declarados
