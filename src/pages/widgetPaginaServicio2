@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Servicio | Marian Madrid</title>
+  <style>
+    :root {
+      --paper: #fbfaf8;
+      --surface: #fff;
+      --ink: #20201f;
+      --muted: #6c6a66;
+      --line: #e8e3dc;
+      --accent: #aa8756;
+      --accent-dark: #80623c;
+      --danger: #a2362a;
+      --danger-bg: #fff2ef;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: Inter, Arial, sans-serif; }
+    button { font: inherit; }
+    .widget { width: 100%; max-width: 1120px; margin: auto; padding: clamp(16px, 4vw, 40px); }
+    .error-banner { display: none; margin-bottom: 18px; padding: 13px 16px; border: 1px solid #f0b9b0; border-radius: 10px; background: var(--danger-bg); color: var(--danger); font-weight: 700; }
+    .back-button { margin-bottom: 22px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; font-weight: 800; text-transform: uppercase; }
+    .hero { display: grid; grid-template-columns: 1.05fr .95fr; overflow: hidden; border: 1px solid var(--line); border-radius: 24px; background: var(--surface); box-shadow: 0 20px 50px rgba(45, 38, 28, .08); }
+    .hero-media { position: relative; min-height: 360px; background: #e9e2d9; }
+    .hero-image { display: block; width: 100%; height: 100%; min-height: 360px; object-fit: cover; }
+    .media-overlay { position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(20, 17, 13, .42)); pointer-events: none; }
+    .media-badge { position: absolute; top: 18px; left: 18px; padding: 8px 10px; border-radius: 999px; background: rgba(255, 255, 255, .92); font-size: 10px; font-weight: 900; letter-spacing: .12em; }
+    .hero-content { display: flex; flex-direction: column; justify-content: center; padding: clamp(26px, 5vw, 56px); }
+    .eyebrow, .card-kicker { margin: 0 0 12px; color: var(--accent-dark); font-size: 11px; font-weight: 900; letter-spacing: .13em; text-transform: uppercase; }
+    h1, h2 { margin: 0; font-family: Georgia, serif; font-weight: 500; }
+    h1 { font-size: clamp(34px, 5vw, 58px); line-height: .98; }
+    h2 { font-size: 30px; }
+    .summary { margin: 20px 0 0; color: #45423e; font-size: 17px; line-height: 1.65; }
+    .meta-list { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 28px; }
+    .meta-item { padding: 13px 0; border-top: 1px solid var(--line); }
+    .meta-label { display: block; color: var(--muted); font-size: 10px; font-weight: 900; text-transform: uppercase; }
+    .meta-value { display: block; margin-top: 5px; font-size: 13px; font-weight: 700; }
+    .service-grid { display: grid; grid-template-columns: 1fr 330px; gap: 40px; margin-top: 40px; align-items: start; }
+    .content-stack { display: grid; gap: 18px; }
+    .card { padding: 30px; border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
+    .description { margin: 16px 0 0; color: #47433f; line-height: 1.8; white-space: pre-line; }
+    .addons-list, .recommendations { display: grid; gap: 10px; margin-top: 16px; }
+    .addon { display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: #fffdfb; cursor: pointer; }
+    .addon-name { font-size: 14px; font-weight: 800; }
+    .addon-price { color: var(--accent-dark); font-size: 13px; font-weight: 900; }
+    .recommendation { padding: 13px 15px; border-left: 3px solid var(--accent); background: #fcf8f2; color: #4e4130; }
+    .booking-card { position: sticky; top: 16px; padding: 24px; border-radius: 16px; background: #27231f; color: #fff; }
+    .booking-label { margin: 0; color: #d9c4a4; font-size: 10px; font-weight: 900; text-transform: uppercase; }
+    .booking-price { margin: 9px 0 4px; font-family: Georgia, serif; font-size: 42px; }
+    .booking-note { color: #ded8cf; font-size: 13px; line-height: 1.55; }
+    .total-extras { display: none; margin-top: 18px; padding: 11px 0; border-top: 1px solid rgba(255, 255, 255, .16); color: #e8dfd1; font-size: 13px; }
+    .booking-button { width: 100%; min-height: 54px; margin-top: 22px; padding: 14px 18px; border: 0; border-radius: 10px; background: #f1e1c8; color: #292018; cursor: pointer; font-size: 13px; font-weight: 900; text-transform: uppercase; }
+    .booking-button:disabled { background: #8b8379; color: #d6d1cb; cursor: not-allowed; }
+    .booking-assurance { color: #c9c0b5; font-size: 11px; line-height: 1.55; text-align: center; }
+    @media (max-width: 820px) { .hero, .service-grid { grid-template-columns: 1fr; } .booking-card { position: static; } }
+    @media (max-width: 480px) { .meta-list { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="widget">
+    <button id="btnBack" class="back-button" type="button">&lt;- Volver a servicios</button>
+    <div id="errorBanner" class="error-banner" role="alert"></div>
+    <section class="hero">
+      <div class="hero-media">
+        <img id="serviceImage" class="hero-image" src="" alt="Imagen del servicio">
+        <div class="media-overlay"></div>
+        <span class="media-badge">MARIAN MADRID</span>
+      </div>
+      <div class="hero-content">
+        <p class="eyebrow">Reserva online</p>
+        <h1 id="serviceTitle">Servicio</h1>
+        <p id="serviceSummary" class="summary">Cargando informacion del servicio...</p>
+        <div class="meta-list">
+          <div class="meta-item"><span class="meta-label">Localizacion</span><span id="serviceLocation" class="meta-value">-</span></div>
+          <div class="meta-item"><span class="meta-label">Duracion aprox.</span><span id="serviceDuration" class="meta-value">-</span></div>
+        </div>
+      </div>
+    </section>
+    <section class="service-grid">
+      <div class="content-stack">
+        <article class="card"><p class="card-kicker">El servicio</p><h2>Detalles y cuidado</h2><p id="serviceDescription" class="description">Cargando detalles del servicio...</p></article>
+        <article id="addonsSection" class="card" style="display:none"><p class="card-kicker">Personaliza tu reserva</p><h2>Complementos</h2><div id="addonsContainer" class="addons-list"></div></article>
+        <article id="recommendationsSection" class="card" style="display:none"><p class="card-kicker">Recomendacion profesional</p><h2>Para prolongar el resultado</h2><div id="recommendationsContainer" class="recommendations"></div></article>
+      </div>
+      <aside class="booking-card">
+        <p class="booking-label">Precio desde</p><div id="servicePrice" class="booking-price">-</div>
+        <p id="bookingDuration" class="booking-note">Duracion aproximada: -</p>
+        <div id="extrasSummary" class="total-extras"></div>
+        <button id="btnBookNow" class="booking-button" type="button" disabled>Continuar reserva</button>
+        <p class="booking-assurance">Cancelacion sin coste hasta 24 h antes.</p>
+      </aside>
+    </section>
+  </main>
+<script>
+"use strict";
+
+const MESSAGE_TYPES = Object.freeze({
+  READY: "MM_READY",
+  CONTEXT: "MM_CONTEXT",
+  BOOK: "MM_BOOK",
+  NAV: "MM_NAV"
+});
+
+const CONFIG = Object.freeze({
+  HANDSHAKE_ATTEMPTS: 6,
+  HANDSHAKE_BASE_BACKOFF_MS: 500,
+  CONTEXT_TIMEOUT_MS: 60000,
+  DEFAULT_CURRENCY: "EUR",
+  DEFAULT_LOCATION: "Marian Madrid",
+  MAX_ADDONS: 5,
+  PROTOCOL_VERSION: 1,
+  SOURCE_ID: "MM_WIDGET_SERVICE",
+  DEFAULT_IMAGE:
+    "data:image/svg+xml;charset=UTF-8," +
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1200 800'>" +
+    "<rect width='1200' height='800' fill='%23e9e2d9'/>" +
+    "<text x='600' y='390' text-anchor='middle' fill='%23342b24' font-family='Georgia' font-size='68'>MARIAN MADRID</text>" +
+    "<text x='600' y='455' text-anchor='middle' fill='%2380623c' font-family='Arial' font-size='24'>SERVICIO DE BELLEZA</text>" +
+    "</svg>"
+});
+
+const state = {
+  serviceId: "",
+  slug: "",
+  currency: CONFIG.DEFAULT_CURRENCY,
+  price: 0,
+  addOnOptions: [],
+  selectedAddOnIds: new Set(),
+  selectedAddOns: [],
+  contextReceived: false,
+  bookingStarted: false
+};
+
+let contextTimer = null;
+let handshakeTimer = null;
+let handshakeAttempt = 0;
+let readySent = false;
+
+function getElement(id) {
+  return document.getElementById(id);
+}
+
+function cleanText(value, fallback = "") {
+  const result = String(value ?? "").trim();
+  return result || fallback;
+}
+
+function safeNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback;
+  const result = Number(value);
+  return Number.isFinite(result) ? result : fallback;
+}
+
+function getReferenceId(value) {
+  if (typeof value === "string") return cleanText(value);
+  if (!value || typeof value !== "object") return "";
+  return cleanText(
+    value.addOnId || value.nativeId || value.serviceId || value._id || value.id || value.value
+  );
+}
+
+function showError(message) {
+  const banner = getElement("errorBanner");
+  const button = getElement("btnBookNow");
+  if (banner) {
+    banner.textContent = cleanText(message, "Se produjo un error.");
+    banner.style.display = "block";
+  }
+  if (button) button.disabled = true;
+}
+
+function hideError() {
+  const banner = getElement("errorBanner");
+  if (!banner) return;
+  banner.textContent = "";
+  banner.style.display = "none";
+}
+
+function formatPrice(value) {
+  return `${safeNumber(value).toFixed(2).replace(".", ",")} ${state.currency}`;
+}
+
+function isSupportedImage(value) {
+  const image = cleanText(value);
+  return image.startsWith("wix:image://") ||
+    image.startsWith("https://static.wixstatic.com/") ||
+    image.startsWith("https://static.parastorage.com/") ||
+    image.startsWith("data:image/");
+}
+
+function applyImage(value, title) {
+  const image = getElement("serviceImage");
+  if (!image) return;
+  image.alt = `Imagen de ${cleanText(title, "servicio")}`;
+  image.onerror = () => {
+    image.onerror = null;
+    image.src = CONFIG.DEFAULT_IMAGE;
+  };
+  image.src = isSupportedImage(value) ? value : CONFIG.DEFAULT_IMAGE;
+}
+
+function normalizeAddOn(addOn) {
+  if (!addOn || typeof addOn !== "object") return null;
+  const id = getReferenceId(addOn);
+  if (!id) return null;
+  return {
+    id,
+    title: cleanText(addOn.title || addOn.name || addOn.productName, "Complemento"),
+    price: Math.max(0, safeNumber(addOn.price ?? addOn.priceData?.price ?? addOn.productPrice))
+  };
+}
+
+function normalizeRecommendation(recommendation) {
+  if (recommendation && typeof recommendation === "object") {
+    return cleanText(
+      recommendation.name || recommendation.title || recommendation.productName,
+      "Producto recomendado"
+    );
+  }
+  return cleanText(recommendation, "Producto recomendado");
+}
+
+function updatePrice() {
+  const extras = state.selectedAddOns.reduce((total, addOn) => total + addOn.price, 0);
+  const price = getElement("servicePrice");
+  const extrasSummary = getElement("extrasSummary");
+  if (price) price.textContent = formatPrice(state.price + extras);
+  if (!extrasSummary) return;
+  if (!state.selectedAddOns.length) {
+    extrasSummary.textContent = "";
+    extrasSummary.style.display = "none";
+    return;
+  }
+  extrasSummary.textContent = `Complementos seleccionados: +${formatPrice(extras)}`;
+  extrasSummary.style.display = "block";
+}
+
+function renderAddOns() {
+  const section = getElement("addonsSection");
+  const container = getElement("addonsContainer");
+  if (!section || !container) return;
+  container.replaceChildren();
+  state.selectedAddOnIds.clear();
+  state.selectedAddOns = [];
+  if (!state.addOnOptions.length) {
+    section.style.display = "none";
+    updatePrice();
+    return;
+  }
+  section.style.display = "block";
+  state.addOnOptions.forEach((addOn) => {
+    const row = document.createElement("label");
+    const checkbox = document.createElement("input");
+    const name = document.createElement("span");
+    const price = document.createElement("span");
+    row.className = "addon";
+    checkbox.type = "checkbox";
+    checkbox.value = addOn.id;
+    name.className = "addon-name";
+    name.textContent = addOn.title;
+    price.className = "addon-price";
+    price.textContent = `+${formatPrice(addOn.price)}`;
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.selectedAddOnIds.add(addOn.id);
+      else state.selectedAddOnIds.delete(addOn.id);
+      state.selectedAddOns = state.addOnOptions.filter((item) => state.selectedAddOnIds.has(item.id));
+      updatePrice();
+    });
+    row.append(checkbox, name, price);
+    container.appendChild(row);
+  });
+}
+
+function renderRecommendations(service) {
+  const section = getElement("recommendationsSection");
+  const container = getElement("recommendationsContainer");
+  if (!section || !container) return;
+  const meta = service.metadata && typeof service.metadata === "object" ? service.metadata : {};
+  const recommendations = Array.isArray(service.recommendations)
+    ? service.recommendations
+    : Array.isArray(meta.recomendaciones)
+      ? meta.recomendaciones
+      : [];
+  container.replaceChildren();
+  if (!recommendations.length) {
+    section.style.display = "none";
+    return;
+  }
+  recommendations.forEach((recommendation) => {
+    const element = document.createElement("div");
+    element.className = "recommendation";
+    element.textContent = normalizeRecommendation(recommendation);
+    container.appendChild(element);
+  });
+  section.style.display = "block";
+}
+
+function renderService(service) {
+  if (!service || typeof service !== "object" || Array.isArray(service)) {
+    showError("El servicio recibido no es válido.");
+    return false;
+  }
+
+  const meta = service.metadata && typeof service.metadata === "object"
+    ? service.metadata
+    : {};
+  const serviceId = getReferenceId(service.serviceId);
+  if (!serviceId || service.clientHidden === true) {
+    showError("El servicio no está disponible para reserva.");
+    return false;
+  }
+
+  const title = cleanText(service.title || meta.titulo || meta.tituloServicio, "Servicio");
+  const summary = cleanText(service.tagLine || meta.resumenCorto, "Descubre una experiencia personalizada en Marian Madrid.");
+  const description = cleanText(service.description || meta.descripcionLarga, "Detalles del servicio no disponibles.");
+  const location = cleanText(service.location || service.localizacion || meta.localizacion, CONFIG.DEFAULT_LOCATION);
+  const duration = safeNumber(service.totalDuration ?? service.duracionTotal ?? meta.duracionTotal);
+  const price = Math.max(0, safeNumber(service.price ?? meta.precio ?? meta.pricing?.base));
+
+  state.serviceId = serviceId;
+  state.slug = cleanText(service.slug);
+  state.currency = cleanText(service.currency || meta.currency, CONFIG.DEFAULT_CURRENCY).toUpperCase();
+  state.price = price;
+
+  const addOns = Array.isArray(service.addOnOptions)
+    ? service.addOnOptions
+    : Array.isArray(meta.addOnOptions)
+      ? meta.addOnOptions
+      : [];
+  state.addOnOptions = addOns.slice(0, CONFIG.MAX_ADDONS).map(normalizeAddOn).filter(Boolean);
+
+  getElement("serviceTitle").textContent = title;
+  getElement("serviceSummary").textContent = summary;
+  getElement("serviceDescription").textContent = description;
+  getElement("serviceLocation").textContent = location;
+  getElement("serviceDuration").textContent = `${duration} min`;
+  getElement("bookingDuration").textContent = `Duración del servicio: ${duration} min`;
+  applyImage(service.mainMedia || meta.mainMedia, title);
+  renderAddOns();
+  renderRecommendations(service);
+  updatePrice();
+
+  state.contextReceived = true;
+  state.bookingStarted = false;
+  clearTimeout(contextTimer);
+  clearTimeout(handshakeTimer);
+  const button = getElement("btnBookNow");
+  if (button) {
+    button.disabled = false;
+    button.textContent = "Continuar reserva";
+  }
+  hideError();
+  return true;
+}
+
+function getTargetOrigin() {
+  try {
+    return document.referrer ? new URL(document.referrer).origin : "*";
+  } catch (_) {
+    return "*";
+  }
+}
+
+function sendMessage(type, payload = {}) {
+  if (!window.parent || window.parent === window) return false;
+  window.parent.postMessage({
+    version: CONFIG.PROTOCOL_VERSION,
+    type,
+    payload
+  }, getTargetOrigin());
+  return true;
+}
+
+function sendReady() {
+  readySent = sendMessage(MESSAGE_TYPES.READY, { status: "INIT" });
+}
+
+function startHandshake() {
+  function retry() {
+    if (state.contextReceived || handshakeAttempt >= CONFIG.HANDSHAKE_ATTEMPTS) return;
+    handshakeAttempt += 1;
+    sendReady();
+    handshakeTimer = setTimeout(retry, CONFIG.HANDSHAKE_BASE_BACKOFF_MS * (2 ** (handshakeAttempt - 1)));
+  }
+  retry();
+  contextTimer = setTimeout(() => {
+    if (!state.contextReceived) showError("No llegaron los datos del servicio.");
+  }, CONFIG.CONTEXT_TIMEOUT_MS);
+}
+
+function handleIncomingMessage(event) {
+  if (event.origin === "file://") return;
+  const message = event?.data;
+  if (!message || typeof message !== "object" || Array.isArray(message)) return;
+  if (Number(message.version) !== CONFIG.PROTOCOL_VERSION) return;
+  if (cleanText(message.type).toUpperCase() !== MESSAGE_TYPES.CONTEXT) return;
+  renderService(message.payload);
+}
+
+function initializeEvents() {
+  getElement("btnBack")?.addEventListener("click", () => {
+    sendMessage(MESSAGE_TYPES.NAV, { target: "SERVICIOS" });
+  });
+  getElement("btnBookNow")?.addEventListener("click", () => {
+    if (!state.contextReceived) {
+      showError("Conectando con el sitio.");
+      return;
+    }
+    if (state.bookingStarted) return;
+    state.bookingStarted = true;
+    const button = getElement("btnBookNow");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Cargando reserva...";
+    }
+    sendMessage(MESSAGE_TYPES.BOOK, {
+      serviceId: state.serviceId,
+      slug: state.slug,
+      addOnIds: Array.from(state.selectedAddOnIds).slice(0, CONFIG.MAX_ADDONS)
+    });
+  });
+}
+
+function initialize() {
+  const image = getElement("serviceImage");
+  if (image) image.src = CONFIG.DEFAULT_IMAGE;
+  initializeEvents();
+  window.addEventListener("message", handleIncomingMessage);
+  startHandshake();
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initialize, { once: true });
+} else {
+  initialize();
+}
+</script>
+</body>
+</html>
