@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reserva Marian Madrid</title>
+<style>
+:root{--bg:#fafafa;--panel:#fff;--text:#2d2d2d;--muted:#666;--accent:#b08d57;--accent-hover:#967845;--border:#e5e5e5;--soft:#f4f4f4;--danger:#d9534f;--success:#2e7d32;--radius:12px;--shadow:0 18px 42px rgba(45,38,29,.08)}
+*{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}body{margin:0;background:var(--bg);color:var(--text);padding:clamp(12px,3vw,28px);font-size:14px}.widget-container{max-width:1120px;margin:auto}h1{font:500 clamp(30px,4vw,46px)/1.02 Georgia,"Times New Roman",serif;letter-spacing:-.04em;color:#111}.booking-hero{display:grid;grid-template-columns:190px minmax(0,1fr);gap:22px;align-items:stretch;margin-bottom:22px;overflow:hidden;border:1px solid var(--border);border-radius:20px;background:var(--panel);box-shadow:var(--shadow)}.booking-hero-image{width:100%;height:100%;min-height:190px;object-fit:cover;background:var(--soft)}.booking-hero-copy{display:flex;flex-direction:column;justify-content:center;padding:26px 28px 26px 0}.hero-kicker{margin:0 0 10px;color:var(--accent-hover);font-size:10px;font-weight:800;letter-spacing:.12em;text-transform:uppercase}.hero-summary{max-width:680px;margin:14px 0 0;color:#514d48;font-size:15px;line-height:1.6}.service-chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}.service-chip{display:inline-flex;padding:8px 10px;border-radius:999px;background:var(--soft);color:#50493f;font-size:12px;font-weight:700}.layout{display:grid;grid-template-columns:minmax(0,1fr) 310px;gap:22px}.panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(16px,2.4vw,24px);margin-bottom:16px;box-shadow:0 8px 24px rgba(45,38,29,.025)}.panel.soft{background:var(--soft);border:0}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.control-group{display:flex;flex-direction:column;margin-bottom:12px}fieldset.control-group{border:0;min-inline-size:0;padding:0}.control-label{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:6px}select,input[type=text],input[type=email],input[type=tel]{width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:14px;background:#fff;outline:none}select:focus,input:focus{border-color:var(--accent)}.hint{font-size:11px;color:var(--muted);line-height:1.4}.calendar-wrap{display:flex;flex-direction:column;gap:12px}.calendar-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}.month-title{font-weight:600;font-size:16px;text-transform:capitalize}.nav-btns{display:flex;gap:6px}.nav-btn{width:32px;height:32px;border:1px solid var(--border);background:#fff;border-radius:6px;cursor:pointer;font-weight:bold}.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;text-align:center}.day-header{font-size:11px;font-weight:600;color:var(--muted);padding:6px 0;text-transform:uppercase}.day-cell{appearance:none;width:100%;min-height:38px;padding:10px 0;font:inherit;font-size:13px;border-radius:6px;cursor:pointer;border:1px solid transparent;background:transparent}.day-cell.empty{pointer-events:none}.day-cell:disabled{color:#ccc;cursor:not-allowed}.day-cell.available{font-weight:600;background:var(--soft)}.day-cell.available:hover{border-color:var(--accent);color:var(--accent)}.day-cell.selected,.slot-btn.selected{background:var(--accent)!important;color:#fff!important}.slots-title{font-size:13px;font-weight:600;margin-bottom:10px;color:var(--muted)}.slots-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:8px;max-height:200px;overflow:auto}.slot-btn{padding:8px 4px;border:1px solid var(--border);background:#fff;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer}.addon-item{display:flex;align-items:center;gap:10px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:#fff;cursor:pointer;margin:6px 0}.radio-group{display:flex;flex-direction:column;gap:8px;margin-top:6px}.radio-option{display:flex;align-items:center;gap:8px;font-size:13px}.checkbox-group{display:flex;align-items:flex-start;gap:8px}.summary-image{width:100%;height:150px;object-fit:cover;border-radius:9px;margin-bottom:14px;background:var(--soft)}.summary-service-copy{color:var(--muted);font-size:12px;line-height:1.55}.summary-label{font-size:11px;color:var(--muted);text-transform:uppercase;margin-top:10px}.summary-value{font-weight:600;font-size:14px;margin-top:2px}.price-val{font-size:20px;font-weight:700;color:var(--accent);margin-top:4px}.action-btn{width:100%;padding:14px;background:var(--accent);color:#fff;border:0;border-radius:6px;font-size:15px;font-weight:600;cursor:pointer}.action-btn:disabled{background:#ccc;cursor:not-allowed}.btn-back,.inline-link{background:none;border:0;color:var(--muted);cursor:pointer}.btn-back{font-size:13px;margin-bottom:12px}.inline-link{text-decoration:underline;color:var(--accent-hover);font:inherit}.error-banner{padding:12px;background:#fdeded;border:1px solid #f5c2c7;color:var(--danger);border-radius:6px;font-size:13px;margin-bottom:16px;display:none}.status-banner{padding:12px;background:#edf7ee;border:1px solid #b8ddbc;color:var(--success);border-radius:6px;margin-bottom:16px}[hidden]{display:none!important}@media(max-width:768px){.booking-hero,.layout{grid-template-columns:1fr}.booking-hero{gap:0}.booking-hero-image{min-height:220px;max-height:280px}.booking-hero-copy{padding:24px}}@media(max-width:480px){.row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="widget-container" id="root">
+<button class="btn-back" type="button" onclick="sendNav('SERVICIOS')">&lt;- Volver a servicios</button>
+
+<!-- HERO SECTION: Carga con placeholders visibles -->
+<section class="booking-hero" aria-labelledby="heroServiceTitle">
+    <img class="booking-hero-image" id="heroImage" alt="Imagen del servicio" src="data:image/svg+xml;charset=UTF-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 400'><rect width='600' height='400' fill='%23e9e2d9'/><text x='300' y='205' text-anchor='middle' fill='%23342b24' font-family='Georgia' font-size='36'>MARIAN MADRID</text></svg>">
+    <div class="booking-hero-copy">
+        <p class="hero-kicker">Reserva online</p>
+        <h1 id="heroServiceTitle">Cargando servicio...</h1>
+        <p class="hero-summary" id="heroSummary">Estamos preparando los detalles de tu cita.</p>
+        <div class="service-chips">
+            <span class="service-chip" id="heroLocation">—</span>
+            <span class="service-chip" id="heroDuration">—</span>
+            <span class="service-chip" id="heroPrice">—</span>
+        </div>
+    </div>
+</section>
+
+<div class="error-banner" id="errorBanner" role="alert" aria-live="assertive"></div>
+<div class="status-banner" id="bookingStatus" role="status" aria-live="polite" hidden></div>
+
+<div class="layout">
+    <div>
+        <!-- CONTROLES SUPERIORES -->
+        <div class="panel">
+            <div class="row">
+                <div class="control-group">
+                    <label class="control-label" for="staffSelect">Profesional (opcional)</label>
+                    <select id="staffSelect" onchange="onStaffChange()">
+                        <option value="">Profesional según horario</option>
+                    </select>
+                    <div class="hint" style="margin-top:8px">Por defecto: profesional según horario.</div>
+                </div>
+                <div></div>
+            </div>
+            <div class="control-group">
+                <div class="control-label" id="addonsLabel">Complementos (opcional)</div>
+                <div id="addonsTopContainer"><div class="hint">Cargando complementos...</div></div>
+            </div>
+        </div>
+
+        <!-- CALENDARIO Y SLOTS -->
+        <div class="calendar-wrap">
+            <div class="panel">
+                <div class="calendar-head">
+                    <div class="month-title" id="monthTitle">—</div>
+                    <div class="nav-btns">
+                        <button class="nav-btn" type="button" onclick="changeMonth(-1)" aria-label="Mes anterior">&lt;</button>
+                        <button class="nav-btn" type="button" onclick="changeMonth(1)" aria-label="Mes siguiente">&gt;</button>
+                    </div>
+                </div>
+                <div class="calendar-grid" id="calendarGrid" aria-label="Días disponibles"></div>
+            </div>
+            <div class="panel soft">
+                <div class="slots-title" id="slotsTitle">Horas disponibles</div>
+                <div class="slots-grid" id="slotsContainer" aria-labelledby="slotsTitle">
+                    <div class="hint">Selecciona un día para ver las horas.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- FORMULARIO DE DATOS -->
+        <div class="panel">
+            <div class="row">
+                <div class="control-group">
+                    <label class="control-label" for="inputName">Nombre completo *</label>
+                    <input id="inputName" type="text" autocomplete="name" required>
+                </div>
+                <div class="control-group">
+                    <label class="control-label" for="inputEmail">Correo electrónico *</label>
+                    <input id="inputEmail" type="email" autocomplete="email" required>
+                </div>
+            </div>
+            <div class="row">
+                <div class="control-group">
+                    <label class="control-label" for="inputPhone">Teléfono móvil *</label>
+                    <input id="inputPhone" type="tel" autocomplete="tel" required>
+                </div>
+                <fieldset class="control-group">
+                    <legend class="control-label">Método de pago *</legend>
+                    <div class="radio-group">
+                        <label class="radio-option"><input type="radio" name="paymentMethod" value="PRESENCIAL" checked> Pagar en el salón (presencial)</label>
+                        <label class="radio-option"><input type="radio" name="paymentMethod" value="ONLINE"> Pagar ahora online</label>
+                    </div>
+                    <div class="hint">El pago online abre el checkout seguro si el backend lo tiene configurado.</div>
+                </fieldset>
+            </div>
+            <div class="checkbox-group">
+                <input id="inputRGPD" type="checkbox" required>
+                <label class="hint" for="inputRGPD">Consiento el tratamiento de mi información para gestionar la reserva. *</label>
+            </div>
+            <div class="hint">Consulta la <button class="inline-link" type="button" onclick="sendNav('PRIVACY')">política de privacidad</button>.</div>
+        </div>
+        
+        <div class="panel">
+            <button class="action-btn" id="btnConfirm" onclick="confirmBooking()" type="button">Confirmar cita</button>
+        </div>
+    </div>
+
+    <!-- RESUMEN LATERAL -->
+    <aside class="panel soft">
+        <img id="sumImage" class="summary-image" alt="Imagen del servicio" hidden>
+        <div class="summary-label">Servicio</div>
+        <div class="summary-value" id="sumService">Cargando...</div>
+        <div class="summary-value" id="sumLocation">—</div>
+        <p class="summary-service-copy" id="sumDescription"></p>
+        
+        <div class="summary-label">Duración</div>
+        <div class="summary-value" id="sumDuration">—</div>
+        
+        <div class="summary-label">Profesional</div>
+        <div class="summary-value" id="sumStaff">Profesional según horario</div>
+        
+        <div class="summary-label">Fecha y hora</div>
+        <div class="summary-value" id="sumDate">Selecciona...</div>
+        
+        <div class="summary-label">Precio base</div>
+        <div class="summary-value" id="sumBase">—</div>
+        
+        <div class="summary-label">Complementos</div>
+        <div class="summary-value" id="sumExtras">—</div>
+        
+        <div class="summary-label">Total</div>
+        <div class="price-val" id="sumTotal">—</div>
+    </aside>
+</div>
+</div>
+
+<script>
+"use strict";
+
+// Protocol constants must match public/widgetBridge.js v5011+.
+const MESSAGE_TYPES = Object.freeze({
+    READY: "MM_READY",
+    CONTEXT: "MM_CONTEXT",
+    AVAIL: "MM_AVAIL",
+    SELECT: "MM_SELECT",
+    BOOK: "MM_BOOK",
+    NAV: "MM_NAV"
+});
+
+const CONFIG = Object.freeze({
+    version: 1,
+    maxAddOns: 5,
+    maxHandshake: 6,
+    handshakeDelays: [500, 1000, 2000, 4000, 8000, 8000],
+    currency: "EUR",
+    location: "Marian Madrid",
+    // Fallback image used until service context loads or on error
+    image: "data:image/svg+xml;charset=UTF-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 600 400'><rect width='600' height='400' fill='%23e9e2d9'/><text x='300' y='205' text-anchor='middle' fill='%23342b24' font-family='Georgia' font-size='36'>MARIAN MADRID</text></svg>"
+});
+
+const state = {
+    service: null,
+    year: new Date().getFullYear(),
+    month: new Date().getMonth() + 1,
+    days: [],
+    slots: [],
+    selectedDay: "",
+    selectedSlot: null,
+    addons: new Set(),
+    staffId: "",
+    request: 0,
+    latestAvailability: 0,
+    connected: false,
+    processing: false,
+    completed: false
+};
+
+let handshakeTimer = null;
+let handshakeCount = 0;
+
+const el = (id) => document.getElementById(id);
+
+function text(value, fallback = "") {
+    const result = String(value ?? "").trim();
+    return result || fallback;
+}
+
+function num(value, fallback = 0) {
+    if (value === null || value === undefined || value === "") return fallback;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+function idOf(value) {
+    if (typeof value === "string") return text(value);
+    if (value && typeof value === "object") return text(value.resourceId || value.serviceId || value.addOnId || value.nativeId || value._id || value.id || value.value);
+    return "";
+}
+
+function post(type, payload = {}) {
+    if (!window.parent || window.parent === window) return false;
+    window.parent.postMessage({ version: CONFIG.version, type, payload }, "*");
+    return true;
+}
+
+function showError(message) {
+    const node = el("errorBanner");
+    if (node) {
+        node.textContent = text(message, "Se produjo un error.");
+        node.style.display = "block";
+    }
+}
+
+function hideError() {
+    const node = el("errorBanner");
+    if (node) {
+        node.textContent = "";
+        node.style.display = "none";
+    }
+}
+
+function money(value) {
+    return `${num(value).toFixed(2).replace(".", ",")} ${text(state.service?.currency, CONFIG.currency).toUpperCase()}`;
+}
+
+function safeImage(source) {
+    const s = text(source);
+    return s.startsWith("https://") || s.startsWith("data:image/") ? s : CONFIG.image;
+}
+
+function renderImages(source, title) {
+    ["heroImage", "sumImage"].forEach((key) => {
+        const image = el(key);
+        if (!image) return;
+        image.src = safeImage(source);
+        image.alt = `Imagen de ${text(title, "servicio")}`;
+        image.hidden = false;
+        image.onerror = () => {
+            image.onerror = null;
+            image.src = CONFIG.image;
+        };
+    });
+}
+
+function addonOptions() {
+    return (Array.isArray(state.service?.addOnOptions) ? state.service.addOnOptions : [])
+        .slice(0, CONFIG.maxAddOns)
+        .map((item) => ({
+            id: idOf(item),
+            name: text(item?.title || item?.name || item?.productName, "Complemento"),
+            price: Math.max(0, num(item?.price ?? item?.priceData?.price ?? item?.productPrice))
+        }))
+        .filter((item) => item.id);
+}
+
+function renderStaff() {
+    const select = el("staffSelect");
+    if (!select) return;
+    select.replaceChildren();
+    
+    const defaultOption = document.createElement("option");
+    defaultOption.value = "";
+    defaultOption.textContent = "Profesional según horario";
+    select.appendChild(defaultOption);
+    
+    const staff = Array.isArray(state.service?.staffOptions) ? state.service.staffOptions : [];
+    staff.forEach((person) => {
+        const resourceId = text(person?.resourceId);
+        const name = text(person?.name || person?.displayName);
+        if (!resourceId || !name) return;
+        const option = document.createElement("option");
+        option.value = resourceId;
+        option.textContent = name;
+        select.appendChild(option);
+    });
+    
+    if (state.staffId && !staff.some((person) => text(person?.resourceId) === state.staffId)) {
+        state.staffId = "";
+    }
+    select.value = state.staffId;
+}
+
+function renderAddons() {
+    const container = el("addonsTopContainer");
+    if (!container) return;
+    container.replaceChildren();
+    
+    const options = addonOptions();
+    const initial = Array.isArray(state.service?.addOnIds) ? state.service.addOnIds.map(idOf) : [];
+    state.addons = new Set(initial.filter((id) => options.some((item) => item.id === id)));
+    
+    if (!options.length) {
+        container.textContent = "No hay complementos adicionales.";
+        container.className = "hint";
+        return;
+    }
+    
+    container.className = "";
+    options.forEach((item) => {
+        const label = document.createElement("label");
+        label.className = "addon-item";
+        
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = item.id;
+        input.checked = state.addons.has(item.id);
+        
+        const caption = document.createElement("span");
+        caption.textContent = `${item.name} (+${money(item.price)})`;
+        
+        input.addEventListener("change", () => {
+            if (input.checked) state.addons.add(item.id);
+            else state.addons.delete(item.id);
+            state.selectedDay = "";
+            state.days = [];
+            clearSlots("Los complementos cambiaron. Selecciona un día.");
+            updateSummary();
+            requestDays();
+        });
+        
+        label.append(input, caption);
+        container.appendChild(label);
+    });
+}
+
+function renderService() {
+    const service = state.service;
+    if (!service || typeof service !== "object" || Array.isArray(service)) {
+        showError("El servicio recibido no es válido.");
+        return;
+    }
+    
+    const serviceId = idOf(service.serviceId);
+    if (!serviceId || service.clientHidden === true) {
+        showError("El servicio no está disponible para reserva.");
+        return;
+    }
+    
+    const duration = num(service.totalDuration, num(service.phase1Duration));
+    const title = text(service.title, "Servicio");
+    const description = text(service.description, "Elige fecha y hora para completar tu reserva.");
+    const price = Math.max(0, num(service.price));
+    
+    service.serviceId = serviceId;
+    
+    // Update Hero
+    el("heroServiceTitle").textContent = title;
+    el("heroSummary").textContent = description;
+    el("heroLocation").textContent = text(service.location, CONFIG.location);
+    el("heroDuration").textContent = `${duration} min aprox.`;
+    el("heroPrice").textContent = `Desde ${money(price)}`;
+    
+    // Update Summary Sidebar
+    el("sumService").textContent = title;
+    el("sumLocation").textContent = text(service.location, CONFIG.location);
+    el("sumDescription").textContent = description;
+    el("sumDuration").textContent = `${duration} min`;
+    el("sumBase").textContent = money(price);
+    
+    renderImages(service.mainMedia, title);
+    renderStaff();
+    renderAddons();
+    updateSummary();
+    renderCalendar();
+    
+    state.connected = true;
+    clearTimeout(handshakeTimer);
+    hideError();
+}
+
+function selectedAddons() {
+    return addonOptions().filter((item) => state.addons.has(item.id));
+}
+
+function updateSummary() {
+    const extra = selectedAddons().reduce((sum, item) => sum + item.price, 0);
+    el("sumExtras").textContent = extra ? money(extra) : "Sin complementos";
+    el("sumTotal").textContent = money(num(state.service?.price) + extra);
+    el("sumStaff").textContent = el("staffSelect")?.selectedOptions?.[0]?.textContent || "Profesional según horario";
+    
+    const start = slotStart(state.selectedSlot);
+    if (state.selectedDay && start) {
+        const time = start.includes("T") ? start.split("T")[1].slice(0, 5) : "";
+        el("sumDate").textContent = `${state.selectedDay} a las ${time}`;
+    }
+}
+
+function slotStart(slot) {
+    if (!slot || typeof slot !== "object") return "";
+    const phase = slot.fase1 || slot.phase1 || slot;
+    const ref = phase.slotRef || phase;
+    return text(ref.localStartDate || ref.startDate || ref.start);
+}
+
+// FIX-BRIDGE-CONTRACT: Extraer localEndDate para validación dual en backend
+function getSlotEnd(slot) {
+    if (!slot || typeof slot !== "object") return "";
+    const phase = slot.fase1 || slot.phase1 || slot;
+    const ref = phase.slotRef || phase;
+    return text(ref.localEndDate || ref.endDate || ref.end);
+}
+
+function clearSlots(message = "Selecciona un día para ver las horas disponibles.") {
+    state.slots = [];
+    state.selectedSlot = null;
+    const box = el("slotsContainer");
+    box.replaceChildren();
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.textContent = message;
+    box.appendChild(hint);
+    el("sumDate").textContent = "Selecciona...";
+}
+
+function requestDays() {
+    if (!state.service) return;
+    const requestSequence = ++state.request;
+    state.latestAvailability = requestSequence;
+    post(MESSAGE_TYPES.AVAIL, {
+        action: "days",
+        serviceId: idOf(state.service.serviceId),
+        resourceId: state.staffId || null,
+        year: state.year,
+        month: state.month,
+        addOnIds: Array.from(state.addons).sort(),
+        requestSequence
+    });
+}
+
+function requestSlots(dateYMD) {
+    const requestSequence = ++state.request;
+    state.latestAvailability = requestSequence;
+    post(MESSAGE_TYPES.AVAIL, {
+        action: "slots",
+        serviceId: idOf(state.service?.serviceId),
+        resourceId: state.staffId || null,
+        dateYMD,
+        addOnIds: Array.from(state.addons).sort(),
+        requestSequence
+    });
+}
+
+function onStaffChange() {
+    state.staffId = el("staffSelect")?.value || "";
+    state.selectedDay = "";
+    state.days = [];
+    clearSlots();
+    updateSummary();
+    requestDays();
+}
+
+function changeMonth(delta) {
+    state.month += delta;
+    if (state.month > 12) { state.month = 1; state.year += 1; }
+    if (state.month < 1) { state.month = 12; state.year -= 1; }
+    state.selectedDay = "";
+    state.days = [];
+    clearSlots();
+    renderCalendar();
+    requestDays();
+}
+
+function renderCalendar() {
+    const grid = el("calendarGrid");
+    grid.replaceChildren();
+    
+    ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"].forEach((day) => {
+        const head = document.createElement("div");
+        head.className = "day-header";
+        head.textContent = day;
+        grid.appendChild(head);
+    });
+    
+    el("monthTitle").textContent = new Intl.DateTimeFormat("es-ES", { month: "long", year: "numeric" }).format(new Date(state.year, state.month - 1, 1));
+    
+    const first = new Date(state.year, state.month - 1, 1).getDay();
+    const offset = first === 0 ? 6 : first - 1;
+    const count = new Date(state.year, state.month, 0).getDate();
+    
+    for (let i = 0; i < offset; i++) {
+        const blank = document.createElement("div");
+        blank.className = "day-cell empty";
+        grid.appendChild(blank);
+    }
+    
+    for (let day = 1; day <= count; day++) {
+        const date = `${state.year}-${String(state.month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "day-cell";
+        button.textContent = String(day);
+        button.disabled = !state.days.includes(date);
+        
+        if (!button.disabled) {
+            button.classList.add("available");
+            if (state.selectedDay === date) button.classList.add("selected");
+            button.addEventListener("click", () => {
+                state.selectedDay = date;
+                clearSlots("Cargando horas disponibles...");
+                renderCalendar();
+                requestSlots(date);
+            });
+        }
+        grid.appendChild(button);
+    }
+}
+
+function normalizeDays(data) {
+    const list = Array.isArray(data) ? data : Array.isArray(data?.days) ? data.days : null;
+    if (!list) return null;
+    return list.map((item) => text(item?.dateYMD || item?.dateYmd || item?.date || item)).filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date));
+}
+
+function renderSlots(slots) {
+    const box = el("slotsContainer");
+    box.replaceChildren();
+    
+    if (!Array.isArray(slots) || !slots.length) {
+        const hint = document.createElement("div");
+        hint.className = "hint";
+        hint.textContent = "No hay horas disponibles para este día.";
+        box.appendChild(hint);
+        return;
+    }
+    
+    state.slots = slots;
+    slots.forEach((slot) => {
+        const start = slotStart(slot);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "slot-btn";
+        button.textContent = start.includes("T") ? start.split("T")[1].slice(0, 5) : "Hora";
+        
+        button.addEventListener("click", () => {
+            state.selectedSlot = slot;
+            renderSlots(state.slots);
+            updateSummary();
+        });
+        
+        if (state.selectedSlot === slot) button.classList.add("selected");
+        box.appendChild(button);
+    });
+}
+
+function confirmBooking() {
+    if (state.processing || state.completed) return;
+    if (!state.connected) { showError("Conectando con el sitio."); return; }
+    if (!state.selectedSlot) { showError("Selecciona un día y una hora."); return; }
+    
+    const name = text(el("inputName").value);
+    const email = text(el("inputEmail").value);
+    const phone = text(el("inputPhone").value);
+    
+    if (!name || !email || !phone || !el("inputRGPD").checked) {
+        showError("Completa los datos obligatorios y acepta la política de privacidad.");
+        return;
+    }
+    
+    const start = slotStart(state.selectedSlot);
+    if (!start) { showError("El horario seleccionado no tiene una hora de inicio válida."); return; }
+    
+    // FIX-BRIDGE-CONTRACT: Obtener endDate para validación dual
+    const end = getSlotEnd(state.selectedSlot);
+    
+    state.processing = true;
+    const button = el("btnConfirm");
+    button.disabled = true;
+    button.textContent = "Procesando reserva...";
+    
+    const phase1 = state.selectedSlot.fase1 || state.selectedSlot.phase1 || {};
+    const phase2 = state.selectedSlot.fase2 || state.selectedSlot.phase2 || {};
+    
+    post(MESSAGE_TYPES.BOOK, {
+        serviceId: idOf(state.service.serviceId),
+        slug: text(state.service.slug),
+        localStartDate: start,
+        localEndDate: end, // CRÍTICO: Requerido por resolveStaffForSlot en backend
+        resourceId: state.staffId || null,
+        slotF1: phase1.slotRef || null,
+        slotF2: phase2.slotRef || null,
+        addOnIds: Array.from(state.addons).slice(0, CONFIG.maxAddOns),
+        cliente: { nombre: name, email, telefono: phone },
+        paymentMethod: document.querySelector("input[name='paymentMethod']:checked")?.value || "PRESENCIAL",
+        rgpdConsent: true
+    });
+}
+
+// Expose functions to global scope for inline handlers
+window.changeMonth = changeMonth;
+window.onStaffChange = onStaffChange;
+window.confirmBooking = confirmBooking;
+window.sendNav = (target) => post(MESSAGE_TYPES.NAV, { target: text(target).toUpperCase() });
+
+window.addEventListener("message", (event) => {
+    if (event.source && event.source !== window.parent) return;
+    
+    const message = event.data || {};
+    if (Number(message.version) !== CONFIG.version) return;
+    
+    const type = text(message.type).toUpperCase();
+    const payload = message.payload && typeof message.payload === "object" ? message.payload : {};
+    
+    if (type === MESSAGE_TYPES.CONTEXT) {
+        state.service = payload;
+        renderService();
+        requestDays();
+        return;
+    }
+    
+    if (type === MESSAGE_TYPES.AVAIL) {
+        const sequence = Number(payload.requestSequence) || 0;
+        if (sequence && sequence !== state.latestAvailability) return;
+        
+        if (payload.status === "ERROR") {
+            showError(payload.error?.message || "No se pudo obtener la disponibilidad.");
+            console.error("[calendar-widget] Availability error", payload);
+            return;
+        }
+        
+        if (payload.action === "days") {
+            const days = normalizeDays(payload.data);
+            if (days === null) {
+                state.days = [];
+                showError("La respuesta de disponibilidad no contiene fechas reconocibles.");
+                console.error("[calendar-widget] Unexpected days response", payload);
+            } else {
+                state.days = days;
+                hideError();
+            }
+            renderCalendar();
+            return;
+        }
+        
+        if (payload.action === "slots") {
+            const data = payload.data;
+            const slots = Array.isArray(data) ? data : Array.isArray(data?.slots) ? data.slots : null;
+            if (slots === null) {
+                showError("La respuesta no contiene horarios reconocibles.");
+                console.error("[calendar-widget] Unexpected slots response", payload);
+                renderSlots([]);
+            } else {
+                hideError();
+                renderSlots(slots);
+            }
+            return;
+        }
+    }
+    
+    if (type === MESSAGE_TYPES.SELECT && payload.status === "ERROR") {
+        state.selectedSlot = null;
+        showError(payload.error?.message || "No se pudo validar el horario.");
+        return;
+    }
+    
+    if (type === MESSAGE_TYPES.BOOK) {
+        state.processing = false;
+        if (payload.status === "SUCCESS") {
+            state.completed = true;
+            el("btnConfirm").disabled = true;
+            el("btnConfirm").textContent = "Cita confirmada";
+            const status = el("bookingStatus");
+            status.textContent = "Tu cita ha sido confirmada.";
+            status.hidden = false;
+            return;
+        }
+        el("btnConfirm").disabled = false;
+        el("btnConfirm").textContent = "Confirmar cita";
+        showError(payload.error?.message || "No se pudo completar la reserva.");
+    }
+});
+
+function startHandshake() {
+    function attempt() {
+        if (state.connected) return;
+        if (handshakeCount >= CONFIG.maxHandshake) {
+            showError("No se pudo conectar con el sitio.");
+            return;
+        }
+        handshakeCount += 1;
+        post(MESSAGE_TYPES.READY, { status: "INIT", attempt: handshakeCount });
+        handshakeTimer = setTimeout(attempt, CONFIG.handshakeDelays[handshakeCount - 1] || 8000);
+    }
+    attempt();
+}
+
+// Initialize with default image already set in HTML src attribute
+startHandshake();
+</script>
+</body>
+</html>
