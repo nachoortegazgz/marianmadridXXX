@@ -1,19 +1,11 @@
 /*
 MODULE: pages/calendario-2.js
-VERSION: v5003.9-SYNTAX-RECOVERY
-BASE: v5003.7-ORIGIN-AND-INPUT-FIX + FULL SYNTAX RECOVERY
-Correcciones incluidas:
-- Restauracion completa de operadores corruptos por copy-paste:
-  month < 1, month > 12, &&, ||, ===, !==, =>, ??
-- Identificadores restaurados con guiones bajos y prefijos correctos
-- Template literals restaurados
-- Comentarios multilinea restaurados
-- Arrow functions restauradas
-- Catch vacios restaurados con parametro
-REQUISITOS:
-public/widgetBridge.js debe exportar PROTOCOL_URLS, PROTOCOL_UI y createWidgetBridge.
-El bridge debe aceptar allowOpaqueOrigin:true y llamar onWidgetMessage(message, reply, bridge).
-URL debe incluir serviceId GUID o slug.
+VERSION: v5003.10-URL-RESOLUTION-FIX
+BASE: v5003.9-SYNTAX-RECOVERY
+FIX: resolveServiceFromParams ahora inspecciona wixLocation.path como fallback
+     cuando query.serviceId y query.slug están vacíos. Esto resuelve el error
+     "Servicio no válido" cuando Wix limpia query params o se usa navegación
+     interna sin preservación de parámetros.
 */
 import wixLocation from "wix-location-frontend";
 import wixWindowFrontend from "wix-window-frontend";
@@ -44,6 +36,17 @@ let currentSlug = null;
 let currentService = null;
 let bridge = null;
 
+// Rutas genéricas que NO son slugs de servicio
+const EXCLUDED_PATHS = new Set([
+    "calendario",
+    "calendario-2",
+    "booking-calendar",
+    "reserva-online",
+    "servicios",
+    "inicio",
+    "home"
+]);
+
 function normalizeIdList(value) {
     const values = Array.isArray(value)
         ? value
@@ -63,19 +66,45 @@ function parseUrlParams() {
     };
 }
 
+/**
+ * FIX v5003.10: Resolución robusta de servicio.
+ * Prioridad:
+ *   1. query.serviceId (GUID explícito)
+ *   2. query.slug
+ *   3. Último segmento de wixLocation.path (fallback para rutas dinámicas
+ *      o cuando Wix limpia query params en navegación interna)
+ */
 function resolveServiceFromParams(params) {
+    // 1. GUID explícito en query
     if (params.serviceId && _looksLikeGuid(params.serviceId)) {
         return {
             serviceId: params.serviceId,
             slug: params.slug || null
         };
     }
+
+    // 2. Slug en query
     if (params.slug) {
         return {
             serviceId: null,
             slug: params.slug
         };
     }
+
+    // 3. Fallback: último segmento de la ruta
+    const path = Array.isArray(wixLocation.path) ? wixLocation.path : [];
+    const lastSegment = _safeSlugOrId(path[path.length - 1] || "");
+    
+    if (lastSegment && !EXCLUDED_PATHS.has(lastSegment.toLowerCase())) {
+        console.info("[calendario-2] Service resolved from URL path fallback", {
+            pathSegment: lastSegment
+        });
+        return {
+            serviceId: null,
+            slug: lastSegment
+        };
+    }
+
     return null;
 }
 
@@ -360,16 +389,21 @@ $w.onReady(async () => {
     const traceId = makeTraceId("calendario");
     const params = parseUrlParams();
     const resolved = resolveServiceFromParams(params);
+    
     if (!resolved) {
         console.error("[calendario-2] Servicio no válido", {
             traceId,
             hasServiceId: Boolean(params.serviceId),
-            hasSlug: Boolean(params.slug)
+            hasSlug: Boolean(params.slug),
+            currentPath: wixLocation.path,
+            currentQuery: wixLocation.query
         });
         return;
     }
+    
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
+    
     const widget = $w("#html1");
     if (
         !widget ||
@@ -384,12 +418,11 @@ $w.onReady(async () => {
         });
         return;
     }
+    
     try {
         bridge = createWidgetBridge(widget, {
-            // Wix may report an empty origin for this site-owned HTML component.
             allowOpaqueOrigin: true,
             onContextReady: async () => loadServiceContext(params),
-            // Requires widgetBridge F2 callback signature.
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 const payload = getPayload(message);
