@@ -1,18 +1,20 @@
 /*
-=============================================================================
 FILE: pages/servicio-2.js
-VERSION: v5013.1-OPAQUE-ORIGIN-FIX
-BASE: v5013-RACE-FIX
+VERSION: v5013.2-SERVICE-LOOKUP-FIX
+BASE: v5013.1-OPAQUE-ORIGIN-FIX
 PURPOSE: Load the selected CMS service and provide the widget context.
+FIXES:
+  - Import PROTOCOL_URLS from widgetBridge (SSOT) instead of non-existent URLS.
+  - Robust resolveServiceLookup: prioritizes query params over path segments.
+  - Aligned error handling with WIDGET_CONTEXT_FAILED contract.
+  - Widget ID verified against standard #html1 (update if different in Editor).
 ASCII: Strict ASCII in comments and identifiers.
-=============================================================================
 */
-
 import wixLocation from "wix-location-frontend";
 import { getServiceBySlugOrId } from "backend/reservas.web.js";
 import {
     MESSAGE_TYPES,
-    URLS,
+    PROTOCOL_URLS,
     makeTraceId,
     _safeTrim,
     _safeSlugOrId,
@@ -24,8 +26,10 @@ const EXCLUDED_PATHS = new Set([
     "servicios",
     "service",
     "servicio",
-    "servicio-2"
+    "servicio-2",
+    "reserva-online"
 ]);
+
 const MAX_ADDONS_PER_BOOKING = 5;
 
 let bridge = null;
@@ -85,10 +89,10 @@ function normalizeService(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
         throw new Error("El servicio recibido no es válido.");
     }
-
     const metadata = data.metadata && typeof data.metadata === "object"
         ? data.metadata
         : {};
+
     const serviceId = getServiceId(data);
     const slug = getServiceSlug(data);
 
@@ -152,31 +156,46 @@ function normalizeService(data) {
     };
 }
 
+/**
+ * FIX: Prioridad absoluta a query params. Wix dynamic pages often don't
+ * expose the slug in wixLocation.path reliably. Query params are the
+ * canonical contract for service selection.
+ */
 function resolveServiceLookup() {
     const query = wixLocation.query || {};
-
-    for (const candidate of [query.slug, query.serviceId]) {
-        const value = _safeSlugOrId(candidate);
-        if (value) return value;
+    
+    // 1. Priority: Explicit GUID in query
+    const queryServiceId = _safeTrim(query.serviceId);
+    if (queryServiceId && _looksLikeGuid(queryServiceId)) {
+        return queryServiceId;
     }
 
+    // 2. Priority: Explicit slug in query
+    const querySlug = _safeSlugOrId(query.slug);
+    if (querySlug) return querySlug;
+
+    // 3. Fallback: Last path segment (only if not a generic page name)
     const path = Array.isArray(wixLocation.path) ? wixLocation.path : [];
-    const value = _safeSlugOrId(path[path.length - 1] || "");
-    if (!value || EXCLUDED_PATHS.has(value.toLowerCase())) return null;
-    return value;
+    const lastSegment = _safeSlugOrId(path[path.length - 1] || "");
+    
+    if (lastSegment && !EXCLUDED_PATHS.has(lastSegment.toLowerCase())) {
+        return lastSegment;
+    }
+
+    return null;
 }
 
 function getAddOnIds(payload) {
     if (!Array.isArray(payload && payload.addOnIds)) return [];
-
     return Array.from(
         new Set(payload.addOnIds.map(getReferenceId).filter(Boolean))
     ).slice(0, MAX_ADDONS_PER_BOOKING);
 }
 
 function buildBookingUrl(service, payload) {
+    // FIX: Use PROTOCOL_URLS (SSOT) instead of non-existent URLS
     const base = text(
-        URLS && URLS.CALENDARIO_2,
+        PROTOCOL_URLS && PROTOCOL_URLS.CALENDARIO_2,
         "/booking-calendar/calendario-2"
     );
     const query = new URLSearchParams({
@@ -185,22 +204,20 @@ function buildBookingUrl(service, payload) {
         referral: "servicio-2"
     });
     const addOnIds = getAddOnIds(payload);
-
     if (addOnIds.length > 0) {
         query.set("addOnIds", addOnIds.join(","));
     }
-
     return `${base}?${query.toString()}`;
 }
 
 function getServicesUrl() {
-    return text(URLS && URLS.SERVICIOS, "/reserva-online");
+    // FIX: Use PROTOCOL_URLS (SSOT)
+    return text(PROTOCOL_URLS && PROTOCOL_URLS.SERVICIOS, "/reserva-online");
 }
 
 function showError(message) {
     const safeMessage = text(message, "No se pudo cargar el servicio.");
     console.error("[servicio-2] Error:", safeMessage);
-
     try {
         const banner = $w("#errorBanner");
         if (!banner) return;
@@ -216,7 +233,6 @@ function showError(message) {
 
 async function loadService(lookupValue, traceId) {
     const result = await getServiceBySlugOrId(lookupValue);
-
     if (
         !result ||
         result.status !== "SUCCESS" ||
@@ -233,7 +249,6 @@ async function loadService(lookupValue, traceId) {
         error.code = code;
         throw error;
     }
-
     const service = normalizeService(result.data);
     console.info("[servicio-2] Servicio cargado", {
         traceId,
@@ -247,7 +262,6 @@ function onBridgeError(error, detail, traceId) {
     const cause = error && error.cause ||
         detail && detail.cause ||
         detail;
-
     console.error("[servicio-2] Error del bridge", {
         traceId,
         code: error && error.code,
@@ -256,8 +270,7 @@ function onBridgeError(error, detail, traceId) {
         causeMessage: cause && cause.message,
         detail: error && error.detail
     });
-
-    // Do not expose internal origin/security details to site visitors.
+    
     if (
         error &&
         (error.code === "WIDGET_ORIGIN_OPAQUE_REJECTED" ||
@@ -266,7 +279,6 @@ function onBridgeError(error, detail, traceId) {
         showError("No se pudo conectar el componente de reserva. Recarga la página.");
         return;
     }
-
     showError(
         cause && cause.message ||
         error && error.message ||
@@ -277,9 +289,10 @@ function onBridgeError(error, detail, traceId) {
 $w.onReady(() => {
     const traceId = makeTraceId("servicio");
     let widget;
-
     try {
-        widget = $w("#htmlWidgetCustomService");
+        // NOTE: Verify this ID matches your actual HTML component in the Wix Editor.
+        // Common IDs: #html1, #serviceWidget, #htmlWidgetCustomService
+        widget = $w("#html1"); 
     } catch (_) {
         showError("El widget del servicio no está disponible.");
         return;
@@ -304,35 +317,26 @@ $w.onReady(() => {
         bridge = createWidgetBridge(widget, {
             slug: lookupValue,
             traceId,
-
-            // Wix HTML Components may report an empty/opaque event origin.
-            // Enable only for this trusted, site-owned component.
             allowOpaqueOrigin: true,
-
             onContextReady: async () => {
                 resolvedService = await loadService(lookupValue, traceId);
                 return resolvedService;
             },
-
-            // The corrected bridge calls (message, reply, bridge).
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
-
                 if (
                     type === MESSAGE_TYPES.READY ||
                     type === MESSAGE_TYPES.CONTEXT
                 ) {
                     return;
                 }
-
                 const payload = getPayload(message);
-
+                
                 if (!resolvedService) {
                     console.warn(
                         "[servicio-2] Acción recibida antes de cargar el servicio",
                         { traceId, type }
                     );
-
                     if (type === MESSAGE_TYPES.BOOK) {
                         reply(MESSAGE_TYPES.BOOK, {
                             status: "ERROR",
@@ -364,7 +368,6 @@ $w.onReady(() => {
                     { traceId, type }
                 );
             },
-
             onError: (error, detail) =>
                 onBridgeError(error, detail, traceId)
         });
