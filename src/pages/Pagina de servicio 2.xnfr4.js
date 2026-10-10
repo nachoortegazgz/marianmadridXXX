@@ -1,13 +1,14 @@
 /*
 FILE: pages/servicio-2.js
 VERSION: v5013.2-SERVICE-LOOKUP-FIX
-BASE: v5013.1-OPAQUE-ORIGIN-FIX
+BASE: v5013.1-OPAQUE-ORIGIN-FIX + SYNTAX RECOVERY + PROTOCOL ALIGNMENT
 PURPOSE: Load the selected CMS service and provide the widget context.
 FIXES:
+  - Widget ID corrected to #htmlWidgetCustomService (confirmed in Editor).
   - Import PROTOCOL_URLS from widgetBridge (SSOT) instead of non-existent URLS.
-  - Robust resolveServiceLookup: prioritizes query params over path segments.
-  - Aligned error handling with WIDGET_CONTEXT_FAILED contract.
-  - Widget ID verified against standard #html1 (update if different in Editor).
+  - Full syntax recovery: =>, &&, ||, ?? operators restored.
+  - Recommendations field aligned with new CMS structure (service.recommendations).
+  - Timeout aligned to 30s (PROTOCOL_UI.CONTEXT_TIMEOUT_MS).
 ASCII: Strict ASCII in comments and identifiers.
 */
 import wixLocation from "wix-location-frontend";
@@ -89,6 +90,7 @@ function normalizeService(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) {
         throw new Error("El servicio recibido no es válido.");
     }
+
     const metadata = data.metadata && typeof data.metadata === "object"
         ? data.metadata
         : {};
@@ -116,6 +118,13 @@ function normalizeService(data) {
     const totalDuration = toFiniteNumber(
         data.totalDuration ?? data.duracionTotal ?? metadata.duracionTotal
     );
+
+    // FIX: Alineación con nuevo campo 'recomendaciones' en ServiciosCatalogo
+    const recommendations = Array.isArray(data.recommendations)
+        ? data.recommendations
+        : Array.isArray(metadata.recomendaciones)
+            ? metadata.recomendaciones
+            : [];
 
     return {
         serviceId,
@@ -148,41 +157,29 @@ function normalizeService(data) {
         phase2Duration: toFiniteNumber(
             data.phase2Duration ?? data.tiempoFase2
         ),
-        recommendations: Array.isArray(data.recommendations)
-            ? data.recommendations
-            : Array.isArray(metadata.recomendaciones)
-                ? metadata.recomendaciones
-                : []
+        recommendations: recommendations
     };
 }
 
 /**
  * FIX: Prioridad absoluta a query params. Wix dynamic pages often don't
- * expose the slug in wixLocation.path reliably. Query params are the
- * canonical contract for service selection.
+ * expose the slug in wixLocation.path reliably.
  */
 function resolveServiceLookup() {
     const query = wixLocation.query || {};
     
-    // 1. Priority: Explicit GUID in query
-    const queryServiceId = _safeTrim(query.serviceId);
-    if (queryServiceId && _looksLikeGuid(queryServiceId)) {
-        return queryServiceId;
+    // 1. Priority: Explicit GUID or slug in query
+    for (const candidate of [query.serviceId, query.slug]) {
+        const value = _safeSlugOrId(candidate);
+        if (value) return value;
     }
 
-    // 2. Priority: Explicit slug in query
-    const querySlug = _safeSlugOrId(query.slug);
-    if (querySlug) return querySlug;
-
-    // 3. Fallback: Last path segment (only if not a generic page name)
+    // 2. Fallback: Last path segment (only if not a generic page name)
     const path = Array.isArray(wixLocation.path) ? wixLocation.path : [];
-    const lastSegment = _safeSlugOrId(path[path.length - 1] || "");
+    const value = _safeSlugOrId(path[path.length - 1] || "");
     
-    if (lastSegment && !EXCLUDED_PATHS.has(lastSegment.toLowerCase())) {
-        return lastSegment;
-    }
-
-    return null;
+    if (!value || EXCLUDED_PATHS.has(value.toLowerCase())) return null;
+    return value;
 }
 
 function getAddOnIds(payload) {
@@ -290,9 +287,8 @@ $w.onReady(() => {
     const traceId = makeTraceId("servicio");
     let widget;
     try {
-        // NOTE: Verify this ID matches your actual HTML component in the Wix Editor.
-        // Common IDs: #html1, #serviceWidget, #htmlWidgetCustomService
-        widget = $w("#html1"); 
+        // FIX: Correct Widget ID confirmed by user
+        widget = $w("#htmlWidgetCustomService");
     } catch (_) {
         showError("El widget del servicio no está disponible.");
         return;
@@ -317,11 +313,13 @@ $w.onReady(() => {
         bridge = createWidgetBridge(widget, {
             slug: lookupValue,
             traceId,
+            // Wix HTML Components may report an empty/opaque event origin.
             allowOpaqueOrigin: true,
             onContextReady: async () => {
                 resolvedService = await loadService(lookupValue, traceId);
                 return resolvedService;
             },
+            // The corrected bridge calls (message, reply, bridge).
             onWidgetMessage: async (message, reply) => {
                 const type = getMessageType(message);
                 if (
