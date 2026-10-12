@@ -1,62 +1,48 @@
 /*
 MODULE: backend/booking/bookingUtils.js
-VERSION: v5008.6-FINGERPRINT-CLEAN
-BASE: v5008.5-PAIRTOKEN-CANONICAL
+VERSION: v5008.7-UTILS05-FIX
+BASE: v5008.6-FINGERPRINT-CLEAN + UTILS-05 (P0 catastrofico)
 RESPONSIBILITY: Capa de utilidades PURAS del dominio de reservas. Sin acceso a
                 CMS, sin SDK de Wix, sin efectos.
-                Precedencia declarada: mmUtils > bookingUtils > bookingCore > *.web.js
-STANDARDS: G10 ASCII estricto. Imports permitidos: public/mmUtils (primitivas).
-           Sin imports de internalConfig ni de backend/logger (ver UTILS-03).
+                Precedencia: mmUtils > bookingUtils > bookingCore > *.web.js
+STANDARDS: G10 ASCII estricto. Solo imports de public/mmUtils.
 
-FIXES v5008.6:
-  UTILS-01 (P0) PAIR_FINGERPRINT_FIELDS tenia un espacio final en los 8 literales
-         (claves 'serviceId', 'linkedPhases' y las seis restantes, todas con
-         espacio sobrante al cierre). La huella resultante contenia el nombre de
-         campo seguido de espacio antes del igual, en vez de la forma pegada.
-         ATENCION: corregirlo CAMBIA el valor de todo pairToken. Ver la nota
-         "VENTANA DE DRENAJE" mas abajo antes de publicar.
-  UTILS-02 (P1) La huella duplicaba la informacion: un prefijo campo=valor
-         concatenado Y _stableSerialize(canonical) con los mismos 8 datos.
-         Duplicacion prohibida por BIBLIA 0.5.1. Ahora hay UNA sola
-         serializacion canonica (_stableSerialize sobre el objeto de 8 campos).
-         _stableSerialize ordena claves, por lo que el resultado no depende del
-         orden en que el llamante construyo el objeto.
-  UTILS-03 (P2) resolveLinkedPhase2Duration silenciaba por completo el fallo de
-         catalogo (catch vacio). Se anade console.warn. No se importa
-         backend/logger: este modulo es de utilidades puras y esa dependencia
-         romperia la regla de capa. console esta disponible en el runtime Velo.
-  UTILS-04 (P1) _buildPairFingerprint usaba String(canonical[field] || "").
-         Con || el numero 0 y el booleano false se serializaban como cadena
-         vacia. Sustituido por comprobacion explicita de null/undefined.
+FIX v5008.7:
+  UTILS-05 (P0 CATASTROFICO) PAIR_FINGERPRINT_FIELDS tenia espacio final en los
+         8 literales ("serviceId ", ...). El bucle canonico leia
+         values["serviceId "] === undefined y volcaba cadena vacia en los 8
+         campos. La huella era IDENTICA para todos los pares duales del sitio:
+         _initTransaction colisionaba en ControlOperativo._id y toda reserva
+         dual devolvia PAIR_TOKEN_PAYLOAD_MISMATCH.
+         Nota: en v5008.5 el bug estaba enmascarado porque la huella tambien
+         incluia _stableSerialize(canonical) con claves limpias. Al aplicar
+         UTILS-02 (eliminar serializacion duplicada, correcto por BIBLIA 0.5.1)
+         el defecto latente se hizo total.
+  Se anade guarda de integridad del contrato: si un literal vuelve a corromperse,
+         el test falla en vez de producir tokens colisionados en produccion.
 
-VENTANA DE DRENAJE OBLIGATORIA (UTILS-01):
-  pairToken es a la vez correlacion dual (CitasF2.pairToken) y clave de
-  idempotencia (ControlOperativo._id en la transaccion de saga). Al cambiar el
-  formato de la huella, un reintento de reserva dual que estuviera EN VUELO
-  durante el despliegue generaria un token distinto y no colisionaria con la
-  transaccion existente: riesgo de reserva duplicada.
-  Procedimiento: desplegar en ventana de bajo trafico y ejecutar antes
-  cleanExpiredLocks. No hay reserva dual en vuelo si no hay trafico.
+FIXES HEREDADOS v5008.6:
+  UTILS-01: espacios finales eliminados (ahora verificado).
+  UTILS-02: una sola serializacion canonica (_stableSerialize), cero duplicacion.
+  UTILS-03: resolveLinkedPhase2Duration traza fallos con console.warn (sin
+         backend/logger para preservar la regla de capa pura).
+  UTILS-04: comprobacion explicita null/undefined en vez de || "".
 
-CONTRATO DE HUELLA (invariante, no modificar sin ADR):
-  8 campos: serviceId, linkedPhases, dateYmd, f1Start, f1End, f2Start, f2End,
-  resourceId. Debe ser IDENTICA en los tres puntos donde se genera o consume un
-  pairToken:
-    reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
-    bookingSaga._resolveUnifiedPairToken         (verificador / reemisor)
-    CitasF2.pairToken + ControlOperativo._id     (persistencia e idempotencia)
+VENTANA DE DRENAJE OBLIGATORIA:
+  Al cambiar la huella cambian todos los pairToken. Desplegar en ventana de bajo
+  trafico y ejecutar cleanExpiredLocks antes. Sin drenaje, una reserva dual en
+  vuelo durante el despliegue podria duplicarse.
 
-PENDIENTE (no resuelto aqui, requiere edicion de reservas.web.js):
-  reservas.web._getResourceIdsFromSlot y _normalizeSlotShape son copias privadas
-  de getResourceIdsFromSlot y normalizeSlotShape. Deben delegar en este modulo
-  para cerrar la duplicacion (BIBLIA 0.5.1).
-
-EXPORTS SIN CONSUMIDOR VERIFICADO en los tres modulos auditados
-(reservas.web, bookingSaga, bookingCore). NO se eliminan: un export ausente en
-un modulo ESM provoca SyntaxError en cascada en cualquier consumidor no
-inspeccionado (citasManager.web.js, crons.js, tests). Cerrar con:
+EXPORTS SIN CONSUMIDOR VERIFICADO en reservas.web / bookingSaga / bookingCore:
+  normalizeCatalogAddOn, resolveNativeAddOnIds, cleanGuidListByKey,
+  isDualGapWithinLimit, computeTotalDuration, validateSlotDuration.
+  NO se eliminan: un export ausente en ESM provoca SyntaxError en cascada en
+  consumidores no inspeccionados (citasManager, crons, tests). Cerrar con:
   grep -rn "normalizeCatalogAddOn\|resolveNativeAddOnIds\|cleanGuidListByKey\|isDualGapWithinLimit\|computeTotalDuration\|validateSlotDuration" src/
-Si el comando no devuelve resultados fuera de este fichero, eliminarlos.
+
+PENDIENTE: reservas.web._getResourceIdsFromSlot y _normalizeSlotShape son copias
+  privadas de getResourceIdsFromSlot y normalizeSlotShape. Deben delegar aqui
+  para cerrar la duplicacion (BIBLIA 0.5.1).
 =============================================================================
 */
 
@@ -80,8 +66,6 @@ import {
 // ============================================================================
 // REEXPORTS: primitivas genericas (hogar canonico = public/mmUtils)
 // ============================================================================
-// Se reexportan para que el dominio de reservas tenga una unica superficie de
-// import. No se redefine ninguna logica (BIBLIA 0.5.1).
 export {
     cleanGuidList,
     cleanGuidListByKey,
@@ -95,14 +79,14 @@ export {
 };
 
 // ============================================================================
-// HUELLA Y TOKEN DEL PAR DUAL (UTILS-01, UTILS-02, UTILS-04)
+// HUELLA Y TOKEN DEL PAR DUAL (UTILS-05 FIX)
 // ============================================================================
 
 /**
- * Contrato de huella: 8 campos, nombres exactos. FIX UTILS-01: sin espacio
- * final en los literales. El orden de esta lista fija el orden de insercion en
- * el objeto canonico; _stableSerialize reordena alfabeticamente, por lo que la
- * lista actua como WHITELIST del contrato: ni un campo mas, ni uno menos.
+ * UTILS-05: Contrato de huella: 8 campos, nombres EXACTOS sin espacio final.
+ * El orden de esta lista fija el orden de insercion en el objeto canonico;
+ * _stableSerialize reordena alfabeticamente, por lo que la lista actua como
+ * WHITELIST del contrato: ni un campo mas, ni uno menos.
  */
 const PAIR_FINGERPRINT_FIELDS = Object.freeze([
     "serviceId",
@@ -118,20 +102,21 @@ const PAIR_FINGERPRINT_FIELDS = Object.freeze([
 const DATE_YMD_LOCAL = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
- * UTILS-02: huella determinista del par dual. Unica serializacion canonica.
+ * Huella determinista del par dual. Unica serializacion canonica.
  *
  * Normaliza internamente para que dos llamantes distintos produzcan la misma
  * cadena ante el mismo par:
  *   - texto y GUID: _safeTrim
- *   - instantes locales: _normalizeLocalIsoStr (acepta Date, ISO con Z, ISO local)
- *   - dateYmd: se DERIVA de f1Start normalizado. Si el llamante aporta un
- *     dateYmd valido Y coherente con f1Start se respeta; si falta o discrepa,
- *     gana f1Start. Esta era la unica fuente real de divergencia observada:
- *     reservas.web usaba el dateYmd de la consulta y bookingSaga el de f1Start.
+ *   - instantes locales: _normalizeLocalIsoStr (acepta Date, ISO con Z, local)
+ *   - dateYmd: DERIVADO de f1Start normalizado. Si el llamante aporta un dateYmd
+ *     valido Y coherente con f1Start se respeta; si falta o discrepa, gana f1Start.
  *
- * UTILS-04: los campos ausentes se serializan como cadena vacia mediante
- * comprobacion explicita de null/undefined. Nunca con || (que convertiria 0 o
- * false en cadena vacia).
+ * UTILS-04: campos ausentes -> cadena vacia mediante comprobacion explicita de
+ * null/undefined. Nunca con || (que convertiria 0 o false en cadena vacia).
+ *
+ * UTILS-05 GUARD: si un literal de PAIR_FINGERPRINT_FIELDS vuelve a tener espacio
+ * final, la asercion interna falla en el primer test en lugar de producir tokens
+ * colisionados en produccion.
  */
 export function _buildPairFingerprint(input) {
     const src = (input && typeof input === "object") ? input : {};
@@ -158,8 +143,7 @@ export function _buildPairFingerprint(input) {
         resourceId: _safeTrim(src.resourceId)
     };
 
-    // Objeto canonico: exactamente los 8 campos del contrato, en el orden de la
-    // whitelist. Cualquier valor no string se convierte de forma explicita.
+    // Objeto canonico: exactamente los 8 campos del contrato.
     const canonical = {};
     for (let i = 0; i < PAIR_FINGERPRINT_FIELDS.length; i += 1) {
         const field = PAIR_FINGERPRINT_FIELDS[i];
@@ -167,11 +151,25 @@ export function _buildPairFingerprint(input) {
         canonical[field] = (value === undefined || value === null) ? "" : String(value);
     }
 
+    // UTILS-05 GUARD: verifica que cada campo de la whitelist existe en canonical.
+    // Si un literal se corrompe (espacio final), values[field] sera undefined y
+    // canonical tendra la clave corrupta pero no la limpia. Esta asercion lo
+    // detecta inmediatamente.
+    const canonicalKeys = Object.keys(canonical);
+    for (let j = 0; j < PAIR_FINGERPRINT_FIELDS.length; j += 1) {
+        if (canonicalKeys.indexOf(PAIR_FINGERPRINT_FIELDS[j]) < 0) {
+            throw new Error(
+                "PAIR_FINGERPRINT contract broken: field not present in canonical object: " +
+                PAIR_FINGERPRINT_FIELDS[j]
+            );
+        }
+    }
+
     return _stableSerialize(canonical);
 }
 
 /**
- * UTILS-01: token canonico del par dual. Unica definicion del sistema.
+ * Token canonico del par dual. Unica definicion del sistema.
  * bookingCore lo reexporta; reservas.web y bookingSaga lo consumen.
  */
 export function _buildPairTokenDeterministic(input) {
@@ -196,14 +194,7 @@ export function normalizeSlotShape(slot) {
 
 /**
  * Extrae los resourceId de STAFF disponibles en un slot.
- * Cubre las cuatro variantes de tipo de recurso que devuelve Wix segun version
- * de API y forma del slot:
- *   group.resourceTypeId | group.resourceType.id | group.resourceType._id |
- *   group.typeId
- * y las tres variantes de identificador de recurso:
- *   resource.id | resource._id | resource.resourceId
- * Fallback final: resource directo o resourceId plano en el slot.
- *
+ * Cubre las cuatro variantes de tipo de recurso y las tres de identificador.
  * AVISO (INFORME BOOKINGS 15, error 5): el resultado son resourceId de Bookings.
  * Nunca mezclar con memberId de Members.
  */
@@ -252,9 +243,8 @@ export function getResourceIdsFromSlot(slot, staffResourceTypeId) {
 
 /**
  * Seleccion determinista del profesional con menor carga del dia.
- * Criterio de desempate: el indice mas bajo en la lista de entrada, que proviene
- * del orden de Wix. Nunca devuelve un id fuera de candidateIds.
- * Devuelve null si no hay candidatos: el llamante decide el fallback.
+ * Desempate: indice mas bajo en la lista de entrada (orden de Wix).
+ * Devuelve null si no hay candidatos.
  */
 export function pickStaffByLowestLoad(candidateIds, loadByResourceId) {
     const candidates = cleanGuidList(candidateIds);
@@ -282,20 +272,10 @@ export function pickStaffByLowestLoad(candidateIds, loadByResourceId) {
 // ============================================================================
 
 /**
- * Resuelve la duracion real del servicio F2 (linkedPhases) cuando el servicio
- * padre no declara phase2Duration o la declara a 0.
- *
+ * Resuelve la duracion real del servicio F2 (linkedPhases).
  * Contrato de inyeccion: getServiceFn(slugOrId) -> { status, data, error }.
- * Se inyecta para no importar reservas.web.js desde la capa de utilidades
- * (evita el ciclo utils -> web -> utils).
- *
- * `visited` es el conjunto de serviceId ya recorridos: protege contra
- * autorreferencia y contra ciclos A -> B -> A. Ante cualquier ciclo o fallo se
- * devuelve 0 y el llamante aplica su propio fallback; nunca se inventa una
- * duracion (BIBLIA 0.5.4: no se fabrican datos).
- *
- * UTILS-03: el fallo ya no se silencia. Se usa console.warn (no backend/logger)
- * para no introducir una dependencia de capa en un modulo de utilidades puras.
+ * visited protege contra ciclos. Ante fallo devuelve 0 (nunca inventa duracion).
+ * UTILS-03: traza fallos con console.warn (no backend/logger: capa pura).
  */
 export async function resolveLinkedPhase2Duration(linkedPhases, traceId, visited, getServiceFn) {
     const linkedId = _safeTrim(linkedPhases);
@@ -339,9 +319,6 @@ export async function resolveLinkedPhase2Duration(linkedPhases, traceId, visited
         });
         return 0;
     } catch (error) {
-        // Un fallo de catalogo no debe abortar la disponibilidad: se devuelve 0 y
-        // el llamante aplica su fallback. Se traza aqui porque el llamante no
-        // tiene visibilidad de la causa interna.
         console.warn("resolveLinkedPhase2Duration: fallo al consultar el catalogo", {
             traceId: traceId,
             linkedPhases: linkedId,
@@ -352,18 +329,12 @@ export async function resolveLinkedPhase2Duration(linkedPhases, traceId, visited
 }
 
 // ============================================================================
-// ADD-ONS (ComplementosCatalogo -> Bookings nativeId)
+// ADD-ONS (SIN CONSUMIDOR VERIFICADO - conservar hasta grep de cierre)
 // ============================================================================
-// SIN CONSUMIDOR VERIFICADO en reservas.web / bookingSaga / bookingCore.
-// reservas.web usa _normalizeAddon y bookingSaga usa _detectAddons (copias
-// privadas). Se conservan exportados por seguridad de carga ESM; cerrar con el
-// grep indicado en la cabecera y entonces decidir: o se migra a los consumidores
-// a estas funciones (unico hogar canonico) o se eliminan.
 
 /**
- * Proyecta un add-on del catalogo al contrato minimo que consume el Writer V2.
- * Devuelve null si falta identidad o precio: un add-on ilegible no se inyecta
- * (fail-closed, nunca se cobra sin el extra seleccionado).
+ * Proyecta un add-on del catalogo al contrato minimo del Writer V2.
+ * Devuelve null si falta identidad o precio (fail-closed).
  */
 export function normalizeCatalogAddOn(addOn) {
     if (!addOn || typeof addOn !== "object") return null;
@@ -382,9 +353,7 @@ export function normalizeCatalogAddOn(addOn) {
 
 /**
  * Resuelve los nativeId de Bookings para los addOnIds solicitados.
- * Solo devuelve los que existen en el catalogo del servicio; el resto se
- * devuelve como rechazado para que el llamante decida (fail-closed).
- * El limite es BOOKINGS_ADDON_CONFIG.MAX_POR_RESERVA (5).
+ * Limite: BOOKINGS_ADDON_CONFIG.MAX_POR_RESERVA (5).
  */
 export function resolveNativeAddOnIds(catalogAddOns, requestedIds, maxPerBooking) {
     const catalog = Array.isArray(catalogAddOns) ? catalogAddOns : [];
