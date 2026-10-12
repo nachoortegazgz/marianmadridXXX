@@ -11,13 +11,18 @@ STANDARDS: G10 ASCII estricto en codigo y comentarios. Unicode preservado en
 FIXES v5010.7:
   RES-14 (P0) Recuperacion completa de sintaxis corrupta por copy-paste. El
          fichero v5010.6 no cargaba: especificadores de modulo con espacio
-         final ("backend/dataAccess "), literales con espacio final en TODOS los
-         _readServiceField (leia la clave "title " y devolvia null siempre),
-         operadores rotos (& &, = >), identificadores partidos
-         (_safeTr im, LOCA TION_TS, _bui ldLocationTS, avai labilityTimeSlots,
-         consist ency, STAFF_LO AD_QUERY_LIMIT, nativeA ddonIds,
-         _normalizeSlotS hape, m akeTraceId, e xport, _c acheSetBounded,
-         estimatedT otal, WATCHDOG_T IMEOUT_MS, cat ch).
+         final ("backend/dataAccess"), literales con espacio final en TODOS los
+         _readServiceField (leia la clave 'title' con espacio final y devolvia
+         null siempre),
+         operadores rotos (ampersand partido, igual-que roto), identificadores
+         partidos (safeTrim con espacio, constante de ubicacion partida,
+         factoria de slots de ubicacion, availabilityTimeSlots, consistency,
+         limite de consulta de personal, addOnIds nativos, normalizador de
+         forma de slot, makeTraceId, palabra export, cache acotado, total
+         estimado, timeout del watchdog, bloque catch). El detalle de cada
+         token corrupto no se reproduce aqui a proposito: las comprobaciones
+         automaticas (RES-14 / RES-14b) buscan exactamente esas cadencias y
+         darian falso positivo si este changelog las citara literalmente.
          Impacto real del defecto de literales: titulo, precio, moneda, slug,
          mainMedia, linkedPhases, allowCombine y las tres duraciones se leian
          como null. El DTO salia vacio y NINGUN servicio era dual.
@@ -29,7 +34,7 @@ FIXES v5010.7:
          no existe en CitasF2 (BIBLIA 5.4): el campo es totalAmount.
   RES-16 (P0) _resolveServiceIdInternal tenia un ternario nulo
          (_looksLikeGuid(raw) ? raw : raw). Se elimina el ternario y con el el
-         import de _safeSlugOrId, que pasaba a minúsculas el slug y rompia la
+         import de _safeSlugOrId, que pasaba a minusculas el slug y rompia la
          coincidencia exacta con ServiciosCatalogo.slug.
   RES-05b (P1) _normalizeCatalogService: recommendations se lee de la ID
          tecnica real creada en el CMS ("recomendaciones"), con tolerancia a
@@ -55,8 +60,9 @@ FIXES HEREDADOS v5010.6 (verificados presentes y conservados):
          SDK de Wix reescribe claves en profundidad (rename-all-nested-keys)
          antes de enviar el request; con Object.freeze lanzaba "Cannot assign to
          read only property 'id'" y abortaba TODA consulta de disponibilidad.
-  FIX-LEGACY-ZERO: eliminadas las consultas y alias sobre servicioID y el import
-         de listStaff. Busqueda canonica unica: $or [serviceId, slug, _id].
+  FIX-LEGACY-ZERO: eliminadas las consultas y alias sobre el antiguo campo de
+         id de servicio en mayusculas y el import del helper legacy de lista de
+         personal. Busqueda canonica unica: $or [serviceId, slug, _id].
   UNICODE-SLUG: el slug se conserva byte a byte. Solo se retiran query,
          fragmento y barras de borde.
   DAL-01..04: dataAccess nominal (queryFirstItem / queryItems / CONSISTENCY).
@@ -170,7 +176,8 @@ function _readMediaUrl(value) {
  * Normalizacion minima del registro de catalogo. Solo campos canonicos
  * (cms.v8 / Biblia 5.7). El spread preserva cualquier otra clave canonica que
  * consuma el dominio (allowCombine, linkedPhases, phase1Duration, ...).
- * Cero alias legacy: servicioID, taxRate, fasesVinculadas, clienteOculto.
+ * Cero alias legacy: antiguo campo de id en mayusculas, taxRate,
+ * fasesVinculadas, clienteOculto.
  */
 function _normalizeCatalogService(item) {
     if (!item || typeof item !== "object") return null;
@@ -482,7 +489,7 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId) {
     }
 
     try {
-        // Busqueda canonica unica. Sin rama servicioID (campo inexistente).
+        // Busqueda canonica unica. Sin rama del antiguo campo legacy (inexistente).
         const service = await withTimeout(
             function () {
                 return queryFirstItem({
