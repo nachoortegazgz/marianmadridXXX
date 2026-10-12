@@ -218,7 +218,19 @@ export function assertServiciosCatalogo(item) {
         }
     }
 
-   // =============================================================================
+    // mainMedia: acepta URL de texto O objeto Image (BIBLIA §5.7 nota 2)
+    // Pendiente ADR. No bloquear ninguna forma durante transicion.
+    // Sin validacion restrictiva.
+
+    // Campo 'active' prohibido (eliminado globalmente)
+    if ("active" in item) {
+        throw new Error("SCHEMA_VIOLATION: ServiciosCatalogo.active prohibido");
+    }
+
+    return true;
+}
+
+// =============================================================================
 // BLOQUE 5 - DatosFiscales ASSERTION
 // =============================================================================
 
