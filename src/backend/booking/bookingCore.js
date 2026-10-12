@@ -76,6 +76,7 @@ import wixData from "backend/dataLegacyAdapter";
 import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
 import { assertValidEnum } from "backend/validation";
+
 import {
     BUSINESS_COLLECTIONS,
     OPERATIONAL_COLLECTIONS,
@@ -87,8 +88,13 @@ import {
     SLOT_SEARCH,
     API,
     PAYMENT_STATUS,
-    BOOKING_FIELDS
+    BOOKING_FIELDS,
+    // CORE-20: el contrato de persistencia de CitasF2 vive en internalConfig
+    // (BIBLIA §6.2). bookingCore lo reexporta, nunca lo redefine.
+    CITAS_BOOKING_STATUS,
+    CITAS_PAYMENT_STATUS
 } from "backend/internalConfig";
+
 import {
     _safeTrim,
     _looksLikeGuid,
