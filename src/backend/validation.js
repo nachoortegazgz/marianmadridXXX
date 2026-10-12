@@ -151,9 +151,8 @@ export function assertServiciosCatalogo(item) {
     if (!_nonEmpty(item.serviceId) || !isValidGuid(item.serviceId)) {
         throw new Error("SCHEMA_VIOLATION: ServiciosCatalogo.serviceId must be a valid GUID");
     }
-    if (!_nonEmpty(item.slug)) {
-        throw new Error("SCHEMA_VIOLATION: ServiciosCatalogo requires slug");
-    }
+    // slug is optional. Services may be resolved by serviceId alone.
+    // When present, Unicode values such as n and accented characters are preserved.
     if (!_nonEmpty(item.sku)) {
         throw new Error("SCHEMA_VIOLATION: ServiciosCatalogo requires sku");
     }
