@@ -10,8 +10,9 @@ STANDARDS: G10 ASCII estricto. Imports permitidos: public/mmUtils (primitivas).
 
 FIXES v5008.6:
   UTILS-01 (P0) PAIR_FINGERPRINT_FIELDS tenia un espacio final en los 8 literales
-         ("serviceId ", "linkedPhases ", ...). La huella resultante contenia
-         "serviceId =..." en vez de "serviceId=...".
+         (claves 'serviceId', 'linkedPhases' y las seis restantes, todas con
+         espacio sobrante al cierre). La huella resultante contenia el nombre de
+         campo seguido de espacio antes del igual, en vez de la forma pegada.
          ATENCION: corregirlo CAMBIA el valor de todo pairToken. Ver la nota
          "VENTANA DE DRENAJE" mas abajo antes de publicar.
   UTILS-02 (P1) La huella duplicaba la informacion: un prefijo campo=valor
