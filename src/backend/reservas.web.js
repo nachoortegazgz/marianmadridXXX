@@ -59,7 +59,7 @@ import {
     pickStaffByLowestLoad
 } from "backend/booking/bookingUtils";
 import { logger } from "backend/logger";
-import { getStaffDisplayName } from "backend/staff";
+import { getStaffDisplayName, listStaff } from "backend/staff";
 import { normalizeBookingStatus } from "backend/validation";
 
 const log = logger;
@@ -70,6 +70,39 @@ const log = logger;
 function _readServiceField(service, field) {
     if (!service || typeof service !== "object") return null;
     return service[field] ?? null;
+}
+
+function _normalizeCatalogService(item) {
+    if (!item || typeof item !== "object") return null;
+    return {
+        ...item,
+        serviceId: item.serviceId || item.servicioID,
+        title: item.title || item.titulo || item.servicio,
+        price: item.price ?? item.precio,
+        totalDuration: item.totalDuration ?? item.totalDuracion,
+        location: item.location || item.localizacion,
+        locationId: item.locationId || item.localizacionID,
+        clientHidden: item.clientHidden ?? item.clienteOculto,
+        categoryId: item.categoryId || item.categoriaID,
+        allowCombine: item.allowCombine ?? item.permitirCombinacion,
+        linkedPhases: item.linkedPhases || item.fasesVinculadas,
+        tagLine: item.tagLine || item.lineaDescripcion,
+        description: item.description || item.descripcionLarga,
+        taxIncluded: item.taxIncluded ?? item.impuestoIncluido,
+        taxRate: item.taxRate ?? item.tipoImpositivo,
+        phase1Duration: item.phase1Duration ?? item.fase1Duracion,
+        exposureDuration: item.exposureDuration ?? item.exposicionDuracion,
+        phase2Duration: item.phase2Duration ?? item.fase2Duracion,
+        pricingModel: item.pricingModel || item.preciosModelo,
+        onlinePayment: item.onlinePayment ?? item.pagoOnline,
+        inPersonPayment: item.inPersonPayment ?? item.pagoPresencial,
+        depositAmount: item.depositAmount ?? item.depositoCantidad,
+        depositType: item.depositType || item.depositoTipo,
+        internalNotes: item.internalNotes || item.notasInternas,
+        currency: item.currency || item.moneda,
+        addOnOptions: item.addOnOptions || item.addonOptions || item.complementos,
+        mainMedia: item.mainMedia || item.Imagen || item.imagen
+    };
 }
 
 function _normalizeAddon(addOn) {
@@ -347,7 +380,7 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = 
             service = await withTimeout(
                 () => queryFirstItem({
                     dataCollectionId: SERVICIOS_COL,
-                    filter: { serviceId: { $eq: clean } },
+                    filter: { $or: [{ serviceId: { $eq: clean } }, { servicioID: { $eq: clean } }] },
                     consistency: CONSISTENCY.STRONG
                 }),
                 WATCHDOG_TIMEOUT_MS,
@@ -368,7 +401,7 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = 
             service = await withTimeout(
                 () => queryFirstItem({
                     dataCollectionId: SERVICIOS_COL,
-                    filter: { serviceId: { $eq: clean } },
+                    filter: { $or: [{ serviceId: { $eq: clean } }, { servicioID: { $eq: clean } }] },
                     consistency: CONSISTENCY.STRONG
                 }),
                 WATCHDOG_TIMEOUT_MS,
@@ -383,7 +416,19 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = 
                 error: { code: "SERVICE_NOT_FOUND", message: "Service not found." }
             };
         }
+        service = _normalizeCatalogService(service);
         const mapped = await _mapServiceImport2ToUX(service, traceId);
+        const allStaff = await listStaff(traceId);
+        mapped.staffOptions = allStaff
+            .filter((person) => person && person.resourceId)
+            .map((person) => ({
+                resourceId: person.resourceId,
+                id: person.resourceId,
+                value: person.resourceId,
+                name: person.displayName || person.staffName || "Profesional",
+                label: person.displayName || person.staffName || "Profesional"
+            }));
+        mapped.availableStaff = mapped.staffOptions.map((person) => person.resourceId);
         const cacheEntry = { data: mapped, timestamp: Date.now() };
         _cacheSetBounded(serviceCatalogRAM, clean, cacheEntry, CACHE_MAX_SIZE);
         if (mapped.serviceId) {
