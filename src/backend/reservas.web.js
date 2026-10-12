@@ -1,20 +1,26 @@
 /*
 ============================================================================
 FILE: backend/reservas.web.js
-VERSION: v5010.4-CATALOG-NORMALIZE-FIX
-BASE: v5010.3-UNICODE-SLUG-FIX + CATALOG NORMALIZATION FIX
+VERSION: v5010.5-STAFF-FROM-SLOTS
+BASE: v5010.4-CATALOG-NORMALIZE-FIX + STAFF FROM SLOTS FIX
 RESPONSIBILITY: Availability engine, dual slots, staff pairing and caching.
 STANDARDS: G10 ASCII Strict in code. Unicode preserved in data values (slugs).
-FIXES APLICADOS v5010.4:
-CATALOG-NORMALIZE: _normalizeCatalogService simplified to canonical fields
-       only. Removed all legacy aliases (servicioID, taxRate, fasesVinculadas,
-       etc.). Source of truth is ServiciosCatalogo with canonical field names.
-SEARCH-UNIFIED: _getServiceBySlugOrIdInternal uses single $or filter for
-       serviceId, slug, and _id lookup. No separate GUID/slug branches.
-VALIDATION-PRESERVED: _mapServiceImport2ToUX validates serviceId as GUID
-       using _readServiceField + _looksLikeGuid. No servideId/servicioID.
+FIXES APLICADOS v5010.5:
+STAFF-FROM-SLOTS: availableStaff and staffOptions are now derived exclusively
+       from Bookings availability slots via _getStaffOptionsFromSlots().
+       The field ServiciosCatalogo.availableStaff does not exist in the CMS
+       and must never be read. Staff shown to users are ONLY those that
+       Bookings returns as available resources for that service/date/addons.
+       getAvailableSlots response now includes availableStaff[] and
+       staffOptions[] populated from real slot availability.
+       _mapServiceImport2ToUX returns empty arrays initially; the frontend
+       populates them from the slots response.
+FIXES HEREDADOS v5010.4:
+CATALOG-NORMALIZE: Simplified normalization, canonical fields only.
+SEARCH-UNIFIED: Single $or filter for serviceId/slug/_id.
+VALIDATION-PRESERVED: serviceId validated as GUID.
 FIXES HEREDADOS v5010.3:
-UNICODE-SLUG: _safeSlugOrId preserves ñ and accents.
+UNICODE-SLUG: Preserves ñ and accents.
 SYNTAX-FULL: All operators restored.
 FIXES HEREDADOS v5010.2:
 FIX-DTO-STAFF-01: staffOptions includes explicit resourceId.
@@ -74,8 +80,7 @@ function _readServiceField(service, field) {
 
 /**
  * CATALOG-NORMALIZE: Simplified normalization. Only canonical field names
- * from ServiciosCatalogo are accepted. No legacy aliases (servicioID,
- * taxRate, fasesVinculadas, etc.). The CMS is the authority (Biblia 0.5.2).
+ * from ServiciosCatalogo are accepted. No legacy aliases.
  */
 function _normalizeCatalogService(item) {
     if (!item || typeof item !== "object") {
@@ -126,8 +131,6 @@ const CONFIGURED_LOCATION_TYPE = _safeTrim(
     SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.TIME_SLOTS
 );
 
-// LOCATION_TS is frozen for READ operations (listAvailabilityTimeSlots).
-// For WRITE operations (createBooking), use _buildLocationTS() from bookingCore.
 const LOCATION_TS = Object.freeze({
     id: SDK_CONFIG.LOCATION_ID,
     locationType:
@@ -267,6 +270,39 @@ async function _getStaffDisplayNamePublic(resourceId) {
     }
 }
 
+/**
+ * STAFF-FROM-SLOTS: Extracts unique staff resourceIds from availability slots
+ * returned by Wix Bookings and resolves their display names. This is the ONLY
+ * source of staff data — ServiciosCatalogo.availableStaff does not exist.
+ * Staff shown to users are exclusively those with real availability.
+ */
+async function _getStaffOptionsFromSlots(slots) {
+    const resourceIds = Array.from(
+        new Set(
+            slots
+                .flatMap(function (slot) {
+                    return _getResourceIdsFromSlot(slot);
+                })
+                .filter(function (resourceId) {
+                    return _looksLikeGuid(resourceId);
+                })
+        )
+    );
+
+    return Promise.all(
+        resourceIds.map(async function (resourceId) {
+            const name = await _getStaffDisplayNamePublic(resourceId);
+            return {
+                resourceId: resourceId,
+                id: resourceId,
+                value: resourceId,
+                name: name,
+                label: name
+            };
+        })
+    );
+}
+
 function _getRequestedAddonContext(service, requestedAddonIds) {
     const requested = new Set(
         (Array.isArray(requestedAddonIds) ? requestedAddonIds : [])
@@ -338,16 +374,10 @@ async function _verifyRequiredStaffViaGet(params) {
 // ============================================================================
 // SERVICE CATALOG
 // ============================================================================
-/**
- * SEARCH-UNIFIED: Single $or filter for serviceId, slug, and _id.
- * No separate GUID/slug branches. Unicode slugs preserved exactly.
- */
 export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId) {
     const traceId = externalTraceId || makeTraceId("service");
     const raw = _safeTrim(slugOrId);
 
-    // UNICODE-SLUG-FIX: Preserve exact slug value including ñ and accents.
-    // Only strip query params and fragments, never normalize characters.
     const clean = raw
         ? String(raw)
             .split("?")[0]
@@ -370,7 +400,6 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId) {
     }
 
     try {
-        // SEARCH-UNIFIED: Single query with $or for serviceId, slug, _id.
         const service = await withTimeout(
             function () {
                 return queryFirstItem({
@@ -438,8 +467,9 @@ export async function _resolveServiceIdInternal(serviceIdReq) {
 }
 
 /**
- * VALIDATION-PRESERVED: serviceId validated as GUID via _readServiceField.
- * No servideId/servicioID references. Canonical field name only.
+ * STAFF-FROM-SLOTS: availableStaff and staffOptions are returned EMPTY here.
+ * They are populated dynamically by getAvailableSlots from real Bookings
+ * availability. ServiciosCatalogo.availableStaff does not exist in the CMS.
  */
 export async function _mapServiceImport2ToUX(service, traceId) {
     const serviceId = _safeTrim(_readServiceField(service, "serviceId"));
@@ -503,22 +533,6 @@ export async function _mapServiceImport2ToUX(service, traceId) {
         : phase1Duration;
     const estimatedTotal = phaseSum;
 
-    const availableStaff = cleanGuidList(_readServiceField(service, "availableStaff"));
-
-    // FIX-DTO-STAFF-01: HTML expects person.resourceId and person.name
-    const staffOptions = await Promise.all(
-        availableStaff.map(async function (resourceId) {
-            const displayName = await _getStaffDisplayNamePublic(resourceId);
-            return {
-                resourceId: resourceId,
-                id: resourceId,
-                value: resourceId,
-                name: displayName,
-                label: displayName
-            };
-        })
-    );
-
     const addOnOptions = (Array.isArray(_readServiceField(service, "addOnOptions"))
         ? _readServiceField(service, "addOnOptions")
         : []
@@ -526,6 +540,8 @@ export async function _mapServiceImport2ToUX(service, traceId) {
         .map(_normalizeAddon)
         .filter(Boolean);
 
+    // STAFF-FROM-SLOTS: Empty arrays. Populated by getAvailableSlots from
+    // real Bookings availability. Never read from ServiciosCatalogo.
     return {
         serviceId: serviceId,
         slug: slug,
@@ -540,8 +556,8 @@ export async function _mapServiceImport2ToUX(service, traceId) {
         tiempoExposicion: exposureDuration,
         tiempoFase2: phase2Duration,
         duracionTotal: estimatedTotal,
-        availableStaff: availableStaff,
-        staffOptions: staffOptions,
+        availableStaff: [],
+        staffOptions: [],
         depositAmount: depositAmount,
         depositType: depositType,
         onlinePayment: onlinePayment,
@@ -721,6 +737,11 @@ export const getConfirmedBookingForDisplay = webMethod(
 // ============================================================================
 // DISPONIBILIDAD SINGLE
 // ============================================================================
+/**
+ * STAFF-FROM-SLOTS: Response now includes availableStaff[] and staffOptions[]
+ * derived exclusively from Bookings slot availability. Staff are only those
+ * with real availability for this service/date/addons combination.
+ */
 export const getAvailableSlots = webMethod(
     Permissions.Anyone,
     async function (serviceIdOrSlug, resourceId, dateYmd, addOnIds) {
@@ -811,13 +832,20 @@ export const getAvailableSlots = webMethod(
                 .map(function (slot) { return _attachServiceId(slot, serviceId, traceId, "getAvailableSlots"); })
                 .filter(Boolean);
 
+            // STAFF-FROM-SLOTS: Derive staff from actual slot availability.
+            const staffOptions = await _getStaffOptionsFromSlots(slots);
+
             return {
                 status: "SUCCESS",
                 data: {
                     slots: slots,
                     serviceId: serviceId,
                     dateYmd: ymd,
-                    resourceId: requestedResourceId[0] || null
+                    resourceId: requestedResourceId[0] || null,
+                    availableStaff: staffOptions.map(function (staff) {
+                        return staff.resourceId;
+                    }),
+                    staffOptions: staffOptions
                 },
                 error: null
             };
@@ -906,7 +934,6 @@ export const getAvailableDays = webMethod(
                 300
             );
 
-            // FIX-DIAG-DAYS-02A: diagnostic log
             log.info("getAvailableDays availability response", {
                 traceId: traceId,
                 serviceId: serviceId,
@@ -926,7 +953,6 @@ export const getAvailableDays = webMethod(
                 daySet.add(localStart.slice(0, 10));
             }
 
-            // FIX-DIAG-DAYS-02B: diagnostic log
             log.info("getAvailableDays days computed", {
                 traceId: traceId,
                 dayCount: daySet.size
@@ -944,7 +970,6 @@ export const getAvailableDays = webMethod(
                 error: null
             };
         } catch (error) {
-            // FIX-DIAG-DAYS-01: full technical context in log
             log.error("getAvailableDays failed", {
                 traceId: traceId,
                 serviceKey: _safeTrim(serviceIdOrSlug),
@@ -1116,7 +1141,19 @@ export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, date
     const f2Slots = (Array.isArray(f2Res && f2Res.timeSlots) ? f2Res.timeSlots : [])
         .filter(function (s) { return s && s.bookable === true; });
 
-    const staffPool = cleanGuidList(service.availableStaff || []);
+    // STAFF-FROM-SLOTS: Pool derived from actual F1+F2 slot availability,
+    // not from ServiciosCatalogo.availableStaff (which does not exist).
+    const poolSet = new Set();
+    for (var pi = 0; pi < f1Slots.length; pi++) {
+        var f1ResIds = _getResourceIdsFromSlot(f1Slots[pi]);
+        for (var ri = 0; ri < f1ResIds.length; ri++) poolSet.add(f1ResIds[ri]);
+    }
+    for (var pj = 0; pj < f2Slots.length; pj++) {
+        var f2ResIds = _getResourceIdsFromSlot(f2Slots[pj]);
+        for (var rj = 0; rj < f2ResIds.length; rj++) poolSet.add(f2ResIds[rj]);
+    }
+    const staffPool = Array.from(poolSet);
+
     const loadByResource = await _countStaffLoadForDay(ymd, staffPool, traceId);
     const pairs = [];
 
