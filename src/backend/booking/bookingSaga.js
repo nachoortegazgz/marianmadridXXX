@@ -33,10 +33,13 @@ import {
     BOOKING_TYPE,
     PAYMENT_STATUS,
     PAYMENT_METHOD,
+    // SAGA-11: el canal online se expresa con CHANNEL_TYPE (BIBLIA §6.3).
+    // PAYMENT_METHOD no tiene valor ONLINE: es el MEDIO, no el CANAL.
+    CHANNEL_TYPE,
     COMPENSATION_KIND,
     COMPENSATION_STATUS,
     APP_IDS,
-    BOOKING_FIELDS,
+    BOOKING_FIELDS
 } from "backend/internalConfig";
 import {
     makeTraceId,
