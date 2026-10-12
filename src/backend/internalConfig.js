@@ -1,58 +1,38 @@
 /*
 MODULE: backend/internalConfig.js
 VERSION: v11.1-ALIGNED
-BASE: v11.0-SSOT-CLEAN + BIBLIA v10.0 §6.3 / §8 + cms.v8
+BASE: v11.0-SSOT-CLEAN + BIBLIA v10 §6.3 / §8 + cms.v8
 RESPONSIBILITY: SSOT unico de constantes backend. Todo modulo importa desde aqui;
                 nunca se hardcodean strings de coleccion, enum, GUID o timeout.
-STANDARDS: G10 ASCII estricto. Cero aliases. Cero legacy.
+STANDARDS: G10 ASCII estricto. Cero aliases puros. Cero legacy en escritura.
 
 FIXES v11.1:
-  IC-01 (P0) Siete SyntaxError por identificadores partidos:
-         AVAILABILITY_C ACHE_TTL_MS, Object.f reeze, FISCAL _RECOVERY_BATCH_SIZE,
-         DEFAULT_MANAGER _EMAIL, TR ANSACTION_MAX_WAIT_MS, "is ValidGuid",
-         NEGATIVE_INVENTO RY_MOVEMENT_TYPES. El modulo no compilaba y, al ser
-         importado por todo el backend, no cargaba ningun modulo.
-  IC-02 (P0) Espacio final eliminado en TODOS los literales (nombres de
-         coleccion, GUIDs, enums, zona horaria, campos). Con espacio final:
-           - queryItems({dataCollectionId:"CitasF2 "}) no encuentra la coleccion
-           - BOOKING_FIELDS.STATUS="bookingStatus " escribe un campo fantasma y
-             deja bookingStatus vacio -> el hook CitasF2_beforeInsert rechaza
-           - CONTROL_TYPE.SLOT_LOCK="SLOT_LOCK " -> assertValidEnum rechaza el
-             mutex y la idempotencia dual queda inoperativa
-           - BOOKING_TYPE.DUAL_F1 no normaliza -> isDualBookingType() falla y no
-             se exige pairToken
-           - API.STAFF_RESOURCE_TYPE_ID con espacio -> Wix no devuelve recursos
-             y el desplegable de profesionales sale vacio
-  IC-03 (P0) Anadido STAFF_DEFAULT_NAME. reservas.web.js lo importa; un export
-         ausente en ESM es SyntaxError y tumbaba el modulo de disponibilidad.
+  IC-01 (P0) Siete SyntaxError por identificadores partidos restaurados:
+         AVAILABILITY_CACHE_TTL_MS, Object.freeze, FISCAL_RECOVERY_BATCH_SIZE,
+         DEFAULT_MANAGER_EMAIL, TRANSACTION_MAX_WAIT_MS, isValidGuid,
+         NEGATIVE_INVENTORY_MOVEMENT_TYPES.
+  IC-02 (P0) Espacio final eliminado en TODOS los literales. Con espacio:
+         queryItems no encuentra la coleccion, BOOKING_FIELDS escribe campo
+         fantasma, CONTROL_TYPE.SLOT_LOCK es rechazado por assertValidEnum,
+         BOOKING_TYPE.DUAL_F1 no normaliza, API.STAFF_RESOURCE_TYPE_ID con
+         espacio hace que Wix no devuelva recursos.
+  IC-03 (P0) Anadido STAFF_DEFAULT_NAME. reservas.web lo importa; export ausente
+         en ESM = SyntaxError = modulo de disponibilidad muerto.
   IC-08 (P1) Anadidos DATOS_FISCALES_FIELDS, RECORD_TYPE.STAFF_CONFIG y
-         BOOKINGS_SCHEDULE_ID para la migracion de MapaStaff (coleccion suprimida)
-         a DatosFiscales. staff.js resuelve rolWebsite, cruces
-         resourceId<->memberId y scheduleId desde aqui.
-  IC-09 (P1) Anadidos FORBIDDEN_COLLECTIONS (BIBLIA §6: los hooks deben devolver
-         FISCAL_VIOLATION), EU_VAT_PREFIXES (27 prefijos VIES, consumido por
-         validation.isValidNifOrEuVat) y LEGACY_BOOKING_STATUS_VALUES
-         (Matriz §2: tolerancia SOLO de lectura hasta EOL 31/12/2026).
-  IC-07 (P2) INACTIVE_BOOKING_STATUSES documentado: contiene valores CMS y
-         nativos Wix porque se aplica sobre filas historicas de CitasF2.
+         BOOKINGS_SCHEDULE_ID para la migracion de MapaStaff a DatosFiscales.
+  IC-09 (P1) Anadidos FORBIDDEN_COLLECTIONS (BIBLIA §6), EU_VAT_PREFIXES (27
+         prefijos VIES) y LEGACY_BOOKING_STATUS_VALUES (Matriz §2, lectura only).
 
-PENDIENTE DE DECISION (no se cambia unilateralmente una constante de negocio):
-  IC-04: SLOT_SEARCH.MINUTOS_TOLERANCIA = 120 aqui y 10 en el espejo de
-         public/mmUtils.js. Verificar contra BIBLIA §3.2.1 f12 y sincronizar.
-         Mientras diverjan, el espejo frontend miente.
-  IC-05: TIMEOUTS.WATCHDOG_MS = 180000 combinado con _executeWithRetry(fn, 2)
-         en reservas.web da un peor caso de 540 s, muy por encima de los 60 s
-         del frontend. Anadir AVAILABILITY_MS y usarlo en las tres llamadas de
-         disponibilidad (getAvailableDays, getAvailableSlots, dual, exactSlot).
-         No se anade la constante hasta que exista el consumidor (BIBLIA 0.3:
-         cero configuracion sin consumidor).
-  IC-06: CONCURRENCY.TRANSACTION_MAX_WAIT_MS = 3000 es insuficiente para una
-         saga dual (2 createBooking de 25 s + checkout de 20 s). Un segundo
-         cliente sobre el mismo slot recibe TOKEN_BUSY a los 3 s. Recomendado
-         12000. Requiere validacion de UX antes de cambiar.
-  MAPA_STAFF_FIELDS: la coleccion MapaStaff fue suprimida. NO se reexporta.
-         Si security.js o algun test aun lo importa, el fallo es del consumidor:
-         grep -rn "MAPA_STAFF_FIELDS" src/
+PENDIENTE DE DECISION (constantes de negocio, no se cambian unilateralmente):
+  IC-04: SLOT_SEARCH.MINUTOS_TOLERANCIA=120 vs mmUtils espejo=10. Verificar
+         contra BIBLIA §3.2.1 f12 y sincronizar el espejo.
+  IC-05: WATCHDOG_MS=180000 + retry(2) = peor caso 540s >> frontend 60s.
+         Anadir AVAILABILITY_MS cuando exista consumidor en reservas.web.
+  IC-06: TRANSACTION_MAX_WAIT_MS=3000 insuficiente para saga dual (~50s).
+         Recomendado 12000 tras validacion UX.
+  MAPA_STAFF: coleccion suprimida. NO se reexporta. Si algun consumidor vivo
+         aun lo referencia, corregir el consumidor, no restaurar el export:
+         grep -rn "MAPA_STAFF\|MapaStaff" src/backend src/pages
 */
 
 // =============================================================================
@@ -145,7 +125,6 @@ export const APP_IDS = Object.freeze({
 export const SDK_CONFIG = Object.freeze({
     TZ: "Europe/Madrid",
     LOCATION_ID: "7a12abfd-bf30-4847-bcdf-00dc573d4802",
-    // BIBLIA §3.3: availability usa BUSINESS; createBooking usa OWNER_BUSINESS.
     LOCATION_TYPES: Object.freeze({
         TIME_SLOTS: "BUSINESS",
         BOOKINGS_WRITER: "OWNER_BUSINESS"
@@ -245,7 +224,7 @@ export const CONCURRENCY = Object.freeze({
 
 // =============================================================================
 // BLOQUE 8 - SLOT SEARCH (BIBLIA §3.2.1)
-// IC-04 PENDIENTE: MINUTOS_TOLERANCIA diverge del espejo de public/mmUtils.js.
+// IC-04 PENDIENTE: MINUTOS_TOLERANCIA diverge del espejo public/mmUtils.js (10).
 // =============================================================================
 export const SLOT_SEARCH = Object.freeze({
     MINUTOS_TOLERANCIA: 120,
@@ -280,8 +259,8 @@ export const PAYMENT_STATUS = Object.freeze({
 
 // =============================================================================
 // BLOQUE 10 - ENUMS CMS (BIBLIA §6.2 - persistidos en CitasF2)
-// Unica fuente de verdad del contrato de persistencia. bookingCore los
-// reexporta como CMS_BOOKING_STATUS / CMS_PAYMENT_STATUS; NUNCA los redefine.
+// Unica fuente de verdad. bookingCore reexporta como CMS_BOOKING_STATUS /
+// CMS_PAYMENT_STATUS; NUNCA redefine (CORE-20).
 // =============================================================================
 export const CITAS_BOOKING_STATUS = Object.freeze({
     PENDING: "PENDING",
@@ -310,9 +289,9 @@ export const LEGACY_BOOKING_STATUS_VALUES = Object.freeze([
 ]);
 
 /**
- * IC-07: estados que no ocupan slot del profesional. Contiene valores CMS
- * (CANCELLED, NO_SHOW) y nativos Wix (CANCELED, DECLINED) porque se aplica
- * sobre filas historicas de CitasF2 escritas antes de la frontera CORE-11.
+ * IC-07: estados que no ocupan slot. Contiene CMS (CANCELLED, NO_SHOW) y nativos
+ * Wix (CANCELED, DECLINED) porque se aplica sobre filas historicas escritas antes
+ * de la frontera CORE-11.
  */
 export const INACTIVE_BOOKING_STATUSES = Object.freeze([
     "CANCELLED",
@@ -334,9 +313,9 @@ export const MOVEMENT_TYPE = Object.freeze({
 });
 
 /**
- * Canal del hecho economico (ADR-09). Es tambien el valor que bookingSaga usa
- * para distinguir pago online de presencial: CHANNEL_TYPE.ONLINE === "ONLINE"
- * coincide con el selectedPaymentOption nativo de Wix Bookings.
+ * Canal del hecho economico (ADR-09). CHANNEL_TYPE.ONLINE === "ONLINE" coincide
+ * con selectedPaymentOption nativo de Wix Bookings. bookingSaga usa este enum
+ * para distinguir pago online de presencial (SAGA-11).
  */
 export const CHANNEL_TYPE = Object.freeze({
     PRESENCIAL: "PRESENCIAL",
@@ -426,10 +405,7 @@ export const COMPENSATION_STATUS = Object.freeze({
 export const RECORD_TYPE = Object.freeze({
     TERCERO: "TERCERO",
     CONFIG_SISTEMA: "CONFIG_SISTEMA",
-    /**
-     * IC-08: absorbe los datos de la coleccion suprimida MapaStaff que ninguna
-     * API nativa de Wix provee (rolWebsite, notas internas, cruces de ids).
-     */
+    /** IC-08: absorbe datos de MapaStaff suprimida que ninguna API Wix provee. */
     STAFF_CONFIG: "STAFF_CONFIG"
 });
 
@@ -453,9 +429,8 @@ export const CASH_REGISTER_STATUS = Object.freeze({
 });
 
 /**
- * IC-08: campos fisicos de DatosFiscales (cms.v8 §5.1 + los cuatro anadidos
- * para absorber MapaStaff). Unica referencia de nombres de campo: ningun
- * modulo escribe el literal a mano.
+ * IC-08: campos fisicos de DatosFiscales (cms.v8 §5.1 + cuatro anadidos para
+ * absorber MapaStaff). Unica referencia de nombres de campo.
  */
 export const DATOS_FISCALES_FIELDS = Object.freeze({
     TAX_ID: "taxId",
@@ -483,9 +458,8 @@ export const DATOS_FISCALES_FIELDS = Object.freeze({
 });
 
 /**
- * IC-09: prefijos VIES de los 27 Estados miembros. Grecia usa EL (no GR).
- * Consumidor canonico: validation.isValidNifOrEuVat. No incluye los tres
- * paises no UE con intercambio (IS, NO, CH): VIES no los valida.
+ * IC-09: 27 prefijos VIES de Estados miembros UE. Grecia = EL (no GR).
+ * Consumidor: validation.isValidNifOrEuVat. No incluye IS/NO/CH (no VIES).
  */
 export const EU_VAT_PREFIXES = Object.freeze([
     "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
@@ -515,7 +489,6 @@ export const INTEGRITY = Object.freeze({
 
 // =============================================================================
 // BLOQUE 15 - CATALOG STATES (BIBLIA §6.4 - pendiente ADR)
-// No se valida en hooks hasta ADR formal: el CMS contiene datos con ACTIVO.
 // =============================================================================
 export const CATALOG_STATES = Object.freeze({
     ACTIVO: "ACTIVO",
@@ -529,10 +502,10 @@ export const CATALOG_STATES = Object.freeze({
 // =============================================================================
 
 /**
- * Normaliza al contrato canonico SIMPLE / DUAL_F1 / DUAL_F2.
- * Acepta en entrada los valores obsoletos de la Matriz §2 (NORMAL, DUAL) y las
- * grafias sin guion. Devuelve el valor en mayusculas sin transformar si no
- * pertenece al contrato: assertValidEnum fallara de forma explicita.
+ * Normaliza al contrato SIMPLE / DUAL_F1 / DUAL_F2. Acepta obsoletos de
+ * Matriz §2 (NORMAL, DUAL) y grafias sin guion. Devuelve el valor en
+ * mayusculas sin transformar si no pertenece al contrato: assertValidEnum
+ * fallara de forma explicita.
  */
 export function normalizeBookingType(value) {
     const v = String(value === null || value === undefined ? "" : value).trim().toUpperCase();
