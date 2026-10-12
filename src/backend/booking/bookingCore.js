@@ -1,75 +1,79 @@
 /*
 MODULE: backend/booking/bookingCore.js
-VERSION: v5011.0-STAFF-MIGRATION
-BASE: v5009-FISCAL-V20.2-CORE + v5010.7..v5010.9 (CORE-08..CORE-17)
-      + migracion MapaStaff/availableStaff eliminados
+VERSION: v5010.10-PAIRTOKEN-REEXPORT
+BASE: v5010.9-PARSE-FIX + D3 (token canonico movido a bookingUtils)
 RESPONSIBILITY: Primitivas atomicas de reserva (simple y dual con gap) sobre
-                Bookings Writer V2. Locks, idempotencia, persistencia CitasF2.
-STANDARDS: G10 ASCII strict. Sin Node builtins. Cero suppressHooks/suppressAuth.
-CONTRATO DUAL: dos createBooking independientes unidos por pairToken.
-               Multiservice Booking PROHIBIDO (Biblia 3.6): no permite gap de
-               exposicion ni cancelacion independiente de fase.
+                Bookings Writer V2: locks, idempotencia, persistencia CitasF2,
+                proyeccion de slots y traduccion de enums en frontera.
+STANDARDS: G10 ASCII estricto. Sin Node builtins.
+CONTRATO: Reserva dual = DOS createBooking independientes unidos por pairToken.
+          Multiservice Booking PROHIBIDO (BIBLIA 3.6): no permite gap de
+          exposicion ni cancelacion independiente de fase.
 
-DEPENDENCIAS CRITICAS (deben estar desplegadas junto a este modulo):
-  - backend/staff.js debe exportar getStaffScheduleId y getStaffThirdPartyId.
-  - backend/internalConfig.js debe exponer CONCURRENCY.MS_TTL_MUTEX,
-    CONTROL_TYPE (6 subtipos canonicos, Biblia 6.3) y BOOKING_FIELDS.STATUS.
-  - backend/validation.js debe exportar assertValidEnum.
-  - public/mmUtils.js debe exportar _roundMoney y _hashKey.
+FIX v5010.10 (D3):
+  CORE-18 (P0) _buildPairTokenDeterministic ya NO se define aqui: se importa de
+         bookingUtils (unica definicion) y se reexporta para preservar la
+         superficie publica historica que consumen bookingSaga y reservas.web.
+         Motivo: reservas.web (capa web) necesita emitir el token del par dual en
+         disponibilidad; definirlo en core obligaba a un import web -> core. Con
+         la definicion en la capa de utilidades puras se respeta la precedencia
+         mmUtils > bookingUtils > core > web y no hay ciclos.
+  CORE-19 (P2) Eliminado el import de BOOKING_STATUS y el export
+         NATIVE_ENUMS_REFERENCE: no tenian consumidor real (codigo muerto,
+         anti-patron BIBLIA 0.3). PAYMENT_STATUS si se conserva: es el valor por
+         defecto de _persistBooking.
 
-FIXES v5011.0 (MIGRACION STAFF):
-CORE-18: thirdPartyId de CitasF2 se resuelve desde DatosFiscales via
-         staff.getStaffThirdPartyId(resourceId). Antes quedaba vacio con un
-         ADR pendiente; al eliminarse MapaStaff, DatosFiscales (recordType
-         STAFF_CONFIG) pasa a ser la unica fuente del NIF del profesional.
-CORE-19: totalAmount obligatorio y finito. Se rechaza el 0 silencioso que
-         romperia el cuadre taxBase+cuota del ledger y el cierre Z.
-CORE-20: dateYmd respeta el valor aportado por la saga si es valido.
-CORE-21: _buildSlotLockControl lanza si la slot key no porta resourceId GUID.
-         Se elimina _buildLockDocument (wrapper redundante, Biblia 0.5.2).
-
-FIXES HEREDADOS v5010.7..v5010.9:
-CORE-08: sintaxis y referencias rotas (_safeLockId, _generateSlotKey, hashKey,
-         BOOKING _STATUS, literales con espacio final, imports con espacio).
-CORE-09: suppressHooks/suppressAuth eliminados (son no-op en el adaptador;
-         los hooks de data.js siempre corren, R2/SSOT-14).
-CORE-10: CitasF2 escribe el esquema fisico real: slotStart/slotEnd (antes
-         startDate/endDate, campos inexistentes), catalogId, thirdPartyId,
-         totalAmount; contactDetails minimizado (Biblia 0.5.8, RGPD).
-CORE-11: frontera de enums. Wix nativo (Biblia 6.1) -> CMS persistido
-         (Biblia 6.2): CANCELLED con doble L, NO_SHOW, UNPAID/PARTIAL/PAID/
-         REFUNDED. Sin listas de alias ES en escritura (Matriz 2).
-CORE-12: ControlOperativo canonico (controlType, dedupeKey, traceId, y
-         resourceId+expiresAt para SLOT_LOCK). Estado propio a payloadJson.
-CORE-13: generateSlotKey embebe el resourceId completo; parser de 5 piezas.
-CORE-14: .in() no existe en wix-data ni en dataLegacyAdapter -> .hasSome().
-CORE-15: ranking de carga compara contra enums CMS realmente persistidos.
-CORE-16: _initTransaction respeta su contrato {success,error} y no lanza.
-CORE-17: CONTROL_TYPE.IDEMPOTENCY para la transaccion de saga.
-
-PENDIENTE (requiere ADR):
-  - Catalog V1 -> Cart V2 (Biblia 16.2, plazo Feb 2027). createCheckout y
+FIXES HEREDADOS v5010.9 / v5010.8:
+  CORE-08 (P0) Sintaxis y referencias: _safeLockId -> safeLockId,
+         _generateSlotKey -> generateSlotKey, hashKey -> _hashKey,
+         BOOKING _STATUS -> BOOKING_STATUS, literales con espacio final,
+         especificadores de modulo con espacio final, "i nstanceof", "& &".
+  CORE-09 (P0) Cero suppressHooks / suppressAuth. dataLegacyAdapter los ignora
+         (R2/SSOT-14): los hooks de data.js SIEMPRE se ejecutan y toda operacion
+         va elevada. La escritura ahora CUMPLE el contrato del hook.
+  CORE-10 (P0) CitasF2 esquema fisico real (cms.v8 / BIBLIA 5.4): slotStart y
+         slotEnd sustituyen a startDate/endDate (que no existen y se perdian);
+         anadidos catalogId, thirdPartyId y totalAmount; contactDetails minimizado
+         a nombre/email/telefono (BIBLIA 0.5.8, RGPD); traceId exigido fail-fast.
+  CORE-11 (P0) Traduccion unica en frontera Wix nativo (BIBLIA 6.1) -> enum CMS
+         persistido (BIBLIA 6.2): CANCELLED con doble L, NO_SHOW,
+         UNPAID/PARTIAL/PAID/REFUNDED + assertValidEnum. Sin listas de alias ES en
+         escritura (Matriz 2). El reembolso vive en paymentStatus: un booking
+         REFUNDED (Wix) persiste CANCELLED + paymentStatus REFUNDED.
+  CORE-12 (P0) Documentos de ControlOperativo canonicos (BIBLIA 5.11 / 12.2):
+         controlType + dedupeKey + traceId, y resourceId + expiresAt para
+         SLOT_LOCK. El estado propio (lockOwnerId, status, payloadHash, result)
+         migra a payloadJson. Sin campos fantasma fuera de schema.
+  CORE-13 (P0) generateSlotKey embebe el resourceId completo y el parser exige 5
+         piezas, de modo que el mutex satisface el requisito resourceId del hook
+         sin cambiar las firmas publicas de lock/unlock/renew.
+  CORE-14 (P1) .in("resourceId", ids) no existe ni en wix-data legacy ni en
+         dataLegacyAdapter (TypeError en runtime). Sustituido por .hasSome(),
+         que el adaptador traduce a $hasSome.
+  CORE-15 (P1) _rankResourcesByLoad normaliza al enum CMS realmente persistido y
+         solo descarta REFUNDED: PARTIAL sigue ocupando slot del profesional.
+  CORE-16 (P2) _initTransaction respeta su contrato {success, error} ante error
+         de BD en vez de lanzar. Polling deduplicado en _evaluatePendingTransaction.
+  CORE-17 (P2) Transaccion de saga con CONTROL_TYPE.IDEMPOTENCY. BOOKING_TX no
+         pertenece al enum canonico de 6 subtipos (BIBLIA 6.3).
+PENDIENTE (requiere ADR, no se resuelve aqui):
+  - thirdPartyId: CitasF2 lo declara obligatorio como FK a DatosFiscales.taxId,
+    pero una reserva online anonima no tiene ficha fiscal. Se persiste vacio con
+    log.warn. El hook debe validar enums y traceId, no exigir thirdPartyId, hasta
+    que se apruebe el ADR de ficha fiscal de cliente.
+  - Catalog V1 -> Cart V2 (BIBLIA 16.2, plazo Feb 2027): createCheckout y
     getCheckoutUrl siguen en @wix/ecom V1 por contrato con bookingSaga.
-  - Migracion de dataLegacyAdapter a la API nominal de dataAccess.js (R4).
-    Este modulo ya usa dataAccess (queryFirstItem) en la consulta nueva.
-
-HISTORIAL:
-v5009-FISCAL-V20.2 | CORE-01..CORE-07.
-v5008.6 | 2026-09-20 | FIX-32, FIX-33, FIX-43.
-v5008.5 | 2026-09-19 | Coherencia scheduleId.
-v5008.2 | 2026-09-15 | Aligned + dead code removed.
+  - Migracion de dataLegacyAdapter a la API nombrada de dataAccess.js (R4).
+=============================================================================
 */
 
 import { bookings } from "@wix/bookings";
 import { checkout } from "@wix/ecom";
 import { auth } from "@wix/essentials";
-// EXCEPCION DATA API (Biblia Apendice C): acceso CMS server-side. El adaptador
-// eleva toda operacion y garantiza que los hooks de data.js se ejecuten.
+// EXCEPCION DATA API (APENDICE C): acceso CMS server-side. El adaptador eleva
+// toda operacion y garantiza que los hooks de data.js se ejecuten siempre.
 import wixData from "backend/dataLegacyAdapter";
-// R4: las consultas NUEVAS usan la API nominal de dataAccess, no el adaptador
-// legacy (dataAccess.js no tiene export default).
-import { queryFirstItem, CONSISTENCY } from "backend/dataAccess";
-import { getStaffScheduleId, getStaffThirdPartyId } from "backend/staff";
+import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
 import { assertValidEnum } from "backend/validation";
 import {
@@ -83,7 +87,7 @@ import {
     SLOT_SEARCH,
     API,
     PAYMENT_STATUS,
-    BOOKING_FIELDS,
+    BOOKING_FIELDS
 } from "backend/internalConfig";
 import {
     _safeTrim,
@@ -94,27 +98,22 @@ import {
     makeTraceId,
     _toDateSafe,
     _hashKey,
-    _normalizeLocalIsoStr,
+    _normalizeLocalIsoStr
 } from "public/mmUtils";
 import {
     computeGapMinutes,
     getResourceIdsFromSlot,
+    // CORE-18: definiciones canonicas en la capa de utilidades puras.
     _buildPairFingerprint,
+    _buildPairTokenDeterministic
 } from "backend/booking/bookingUtils";
 
 const log = logger;
+
 const STAFF_RESOURCE_TYPE_ID = API.STAFF_RESOURCE_TYPE_ID;
 
-// CORE-05: unica definicion de la huella dual en bookingUtils; aqui solo se
-// reexporta la superficie publica historica, sin duplicar logica.
-export { _buildPairFingerprint };
-// Back-compat: modulos historicos importan logger desde este fichero.
-export { logger };
-
-const CONFIGURED_LOCATION_ID = _safeTrim(SDK_CONFIG && SDK_CONFIG.LOCATION_ID);
-
 // =============================================================================
-// BLOQUE 1 - CODIGOS DE ERROR (Biblia 20.10 + especificos de reserva)
+// BLOQUE 1 - CODIGOS DE ERROR
 // =============================================================================
 export const ERROR_CODES = Object.freeze({
     INVALID_PAYLOAD: "INVALID_PAYLOAD",
@@ -142,37 +141,42 @@ export const ERROR_CODES = Object.freeze({
     INVALID_SLOT_RECHECK: "INVALID_SLOT_RECHECK",
     DATABASE_ERROR: "DATABASE_ERROR",
     INVALID_DATES: "INVALID_DATES",
-    UNKNOWN_ERROR: "UNKNOWN_ERROR",
+    UNKNOWN_ERROR: "UNKNOWN_ERROR"
 });
 
 // =============================================================================
-// BLOQUE 2 - ENUMS: FRONTERA WIX NATIVO <-> CMS PERSISTIDO (CORE-11)
+// BLOQUE 2 - ENUMS EN FRONTERA: WIX NATIVO <-> CMS PERSISTIDO (CORE-11)
 // =============================================================================
-// Biblia 6.2. Unico contrato de persistencia de CitasF2. Se exporta para que
-// bookingSaga, citasManager y los tests compartan la misma fuente: elimina el
-// drift que hacia fallar los fixtures (usaban CANCELADO/PAGADO/UNPAID a la vez).
+
+/**
+ * BIBLIA 6.2: unico contrato de persistencia de CitasF2. Se exporta para que
+ * bookingSaga, citasManager y los tests compartan la misma fuente.
+ */
 export const CMS_BOOKING_STATUS = Object.freeze({
     PENDING: "PENDING",
     CONFIRMED: "CONFIRMED",
     COMPLETED: "COMPLETED",
     CANCELLED: "CANCELLED",
-    NO_SHOW: "NO_SHOW",
+    NO_SHOW: "NO_SHOW"
 });
 
 export const CMS_PAYMENT_STATUS = Object.freeze({
     UNPAID: "UNPAID",
     PARTIAL: "PARTIAL",
     PAID: "PAID",
-    REFUNDED: "REFUNDED",
+    REFUNDED: "REFUNDED"
 });
 
-// Claves: enum nativo Wix (Biblia 6.1) + alias ES de dominio tolerados SOLO en
-// entrada (Matriz 2). Decisiones documentadas:
-//  - CREATED / WAITING_LIST / UPDATED no existen en el CMS: se proyectan al
-//    estado funcional equivalente (PENDING / CONFIRMED).
-//  - REFUNDED y DECLINED como estado de RESERVA implican cita no celebrada:
-//    persisten CANCELLED. El reembolso vive en paymentStatus.
-//  - NO_SHOW con guion bajo, tal como lo define el CMS.
+/**
+ * Traduccion hacia el enum persistido. Claves: enum nativo Wix (BIBLIA 6.1) mas
+ * los alias ES de dominio tolerados SOLO en entrada (Matriz 2).
+ * Decisiones documentadas:
+ *  - CREATED / WAITING_LIST / UPDATED no existen en el CMS: se proyectan al
+ *    estado funcional equivalente.
+ *  - REFUNDED y DECLINED como estado de RESERVA implican cita no celebrada:
+ *    persisten CANCELLED. El reembolso se refleja en paymentStatus.
+ *  - EXEMPT (F2 NO_FEE) no genera importe pendiente: persiste PAID.
+ */
 const WIX_TO_CMS_BOOKING_STATUS = Object.freeze({
     CREATED: "PENDING",
     PENDING: "PENDING",
@@ -191,10 +195,9 @@ const WIX_TO_CMS_BOOKING_STATUS = Object.freeze({
     COMPLETADO: "COMPLETED",
     CANCELADO: "CANCELLED",
     REEMBOLSADO: "CANCELLED",
-    NO_PRESENTADO: "NO_SHOW",
+    NO_PRESENTADO: "NO_SHOW"
 });
 
-// EXEMPT (servicio F2 NO_FEE) no genera importe pendiente: persiste PAID.
 const WIX_TO_CMS_PAYMENT_STATUS = Object.freeze({
     UNDEFINED: "UNPAID",
     NOT_PAID: "UNPAID",
@@ -214,11 +217,10 @@ const WIX_TO_CMS_PAYMENT_STATUS = Object.freeze({
     PARCIALMENTE_PAGADO: "PARTIAL",
     REEMBOLSADO_PARCIAL: "PARTIAL",
     REEMBOLSADO: "REFUNDED",
-    EXENTO: "PAID",
+    EXENTO: "PAID"
 });
 
-// Devuelven "" ante valor desconocido: assertValidEnum fallara de forma
-// explicita en vez de persistir basura (Biblia 0.5.6).
+/** Devuelve "" ante valor desconocido: assertValidEnum fallara de forma explicita. */
 export function _toCmsBookingStatus(value) {
     const v = _safeTrim(value).toUpperCase();
     if (!v) return "";
@@ -231,9 +233,11 @@ export function _toCmsPaymentStatus(value) {
     return WIX_TO_CMS_PAYMENT_STATUS[v] || "";
 }
 
-// Mapa inverso para la API de Wix (CORE-06). bookingSaga envia el SSOT espanol
-// (PAYMENT_STATUS.NOT_PAID = "IMPAGADO") y Wix solo acepta su enum nativo EN.
-// Los valores ya nativos pasan sin cambio (identity pass-through).
+/**
+ * CORE-06: mapa inverso para la API de Wix. bookingSaga envia el SSOT espanol
+ * (PAYMENT_STATUS.NOT_PAID) y Wix solo acepta su enum nativo EN. Los valores ya
+ * nativos pasan sin cambio (identity pass-through).
+ */
 const WIX_NATIVE_PAYMENT_STATUS = Object.freeze({
     UNDEFINED: "UNDEFINED",
     NOT_PAID: "NOT_PAID",
@@ -252,7 +256,7 @@ const WIX_NATIVE_PAYMENT_STATUS = Object.freeze({
     PARTIAL: "PARTIALLY_PAID",
     REEMBOLSADO: "REFUNDED",
     REEMBOLSADO_PARCIAL: "PARTIALLY_REFUNDED",
-    EXENTO: "EXEMPT",
+    EXENTO: "EXEMPT"
 });
 
 function _toWixNativePaymentStatus(value) {
@@ -261,6 +265,7 @@ function _toWixNativePaymentStatus(value) {
     return WIX_NATIVE_PAYMENT_STATUS[v] || value;
 }
 
+/** Estado por defecto cuando el llamante no lo fija (logica heredada preservada). */
 function _deriveCmsBookingStatus(cmsPaymentStatus) {
     return cmsPaymentStatus === CMS_PAYMENT_STATUS.UNPAID
         ? CMS_BOOKING_STATUS.PENDING
@@ -271,18 +276,23 @@ function _deriveCmsBookingStatus(cmsPaymentStatus) {
 // BLOQUE 3 - ELEVATED PROXIES (Bookings V2 + eCommerce)
 // =============================================================================
 // Superficie reducida a los proxies con consumidor real:
-//   cancelBookingElevated        -> bookingSaga (compensacion SAGA-06) + crons.js
+//   cancelBookingElevated        -> bookingSaga (compensacion) + crons.js
 //   confirmOrDeclineBooking...   -> bookingSaga (paso ConfirmPresencial, CORE-06)
 //   createCheckout/getCheckoutUrl-> bookingSaga (flujo ONLINE, Catalog V1)
 // createBookingElevated y rescheduleBookingElevated eliminados: cero consumidores.
-// La creacion usa elevacion selectiva (bookingSaga, FIX-37) solo bajo ACCESS_DENIED.
+// La creacion usa elevacion selectiva (bookingSaga, FIX-37), que solo eleva bajo
+// ACCESS_DENIED. BIBLIA 15.1.1: elevate() por operacion, nunca global.
 export const cancelBookingElevated = auth.elevate(bookings.cancelBooking);
 export const createCheckoutElevated = auth.elevate(checkout.createCheckout);
 export const getCheckoutUrlElevated = auth.elevate(checkout.getCheckoutUrl);
 
 const _confirmOrDeclineElevatedRaw = auth.elevate(bookings.confirmOrDeclineBooking);
 
-// Contrato preservado: (bookingId, options) -> respuesta nativa elevada.
+/**
+ * CORE-06: wrapper elevado que traduce paymentStatus del SSOT al enum nativo que
+ * acepta Wix Bookings. Sin esta traduccion Wix rechaza la confirmacion presencial.
+ * Contrato preservado: (bookingId, options) -> respuesta nativa elevada.
+ */
 export async function confirmOrDeclineBookingElevated(bookingId, options) {
     let normalizedOptions = options;
     if (options && typeof options === "object" && options.paymentStatus !== undefined) {
@@ -291,7 +301,7 @@ export async function confirmOrDeclineBookingElevated(bookingId, options) {
             log.info("CORE-06: paymentStatus translated SSOT -> Wix native", {
                 bookingId: _safeTrim(bookingId),
                 from: options.paymentStatus,
-                to: translated,
+                to: translated
             });
         }
         normalizedOptions = Object.assign({}, options, { paymentStatus: translated });
@@ -299,11 +309,14 @@ export async function confirmOrDeclineBookingElevated(bookingId, options) {
     return _confirmOrDeclineElevatedRaw(bookingId, normalizedOptions);
 }
 
+// Back-compat: modulos historicos importan logger desde este fichero.
+export { logger };
+
 // =============================================================================
 // BLOQUE 4 - BOOKINGERROR Y NORMALIZACION DE ERRORES
 // =============================================================================
 export class BookingError extends Error {
-    constructor(code, message, details) {
+    constructor(code, message, details = {}) {
         super(String(message || "Unknown error"));
         this.name = "BookingError";
         this.code = String(code || ERROR_CODES.UNKNOWN_ERROR);
@@ -322,7 +335,7 @@ export function normalizeError(err) {
             code: String(err.code || ERROR_CODES.UNKNOWN_ERROR),
             message: String(err.message || "Unknown error"),
             stack: err.stack || null,
-            details: err.details || {},
+            details: err.details || {}
         };
     }
     if (err instanceof Error) {
@@ -330,7 +343,7 @@ export function normalizeError(err) {
             code: String(err.code || err.errorCode || err.name || ERROR_CODES.UNKNOWN_ERROR),
             message: String(err.message || "Unknown error"),
             stack: err.stack || null,
-            details: err.details && typeof err.details === "object" ? err.details : {},
+            details: err.details && typeof err.details === "object" ? err.details : {}
         };
     }
     if (typeof err === "string") {
@@ -341,34 +354,35 @@ export function normalizeError(err) {
             code: String(err.code || err.errorCode || err.name || ERROR_CODES.UNKNOWN_ERROR),
             message: String(err.message || err.error || "Unknown error"),
             stack: err.stack || null,
-            details: {},
+            details: {}
         };
     }
     return { code: ERROR_CODES.UNKNOWN_ERROR, message: "Unknown error", stack: null, details: {} };
 }
 
-// Biblia 0.5.5: el error se maneja una vez, en la capa donde ocurre.
+/** BIBLIA 0.5.5: un error se maneja una sola vez, en la capa donde ocurre. */
 export function _handleError(error, context, traceId, logFn) {
     const loggerInstance = logFn || log;
     const norm = normalizeError(error);
     loggerInstance.error("[" + context + "] " + norm.code + ": " + norm.message, {
         traceId: traceId,
-        details: norm.details,
+        details: norm.details
     });
     return {
         status: "ERROR",
         data: null,
         error: {
             code: norm.code || ERROR_CODES.UNKNOWN_ERROR,
-            message: norm.message || "Unknown error",
-        },
+            message: norm.message || "Unknown error"
+        }
     };
 }
 
 // =============================================================================
 // BLOQUE 5 - HELPERS COMPARTIDOS DE BAJO NIVEL
 // =============================================================================
-// Unica ubicacion para leer payloadJson (campo canonico de ControlOperativo).
+
+/** Unica ubicacion para leer payloadJson (campo canonico de ControlOperativo). */
 function _parsePayloadJson(text) {
     const raw = _safeTrim(text);
     if (!raw) return {};
@@ -391,7 +405,7 @@ function _isDuplicateItemError(error) {
 }
 
 // =============================================================================
-// BLOQUE 6 - RESOLUCION DE SCHEDULEID (FALLBACK CONTROLADO)
+// BLOQUE 6 - RESOLUCION DE SCHEDULEID
 // =============================================================================
 async function _resolveScheduleIdByResourceId(resourceId) {
     const id = _safeTrim(resourceId);
@@ -400,32 +414,46 @@ async function _resolveScheduleIdByResourceId(resourceId) {
     return scheduleId && _looksLikeGuid(scheduleId) ? scheduleId : null;
 }
 
+/**
+ * BIBLIA 11.1: el Writer V2 exige scheduleId explicito. La autoridad primaria es
+ * el slot de disponibilidad; esta cascada es el ultimo recurso. Devuelve null si
+ * no hay scheduleId util: el llamante hace fail-fast (nunca se proyecta "").
+ */
 export async function _resolveScheduleIdForResource(resourceId, sourceSlot) {
     const resourceIdClean = _safeTrim(resourceId);
     if (!resourceIdClean || !_looksLikeGuid(resourceIdClean)) return null;
     const s = sourceSlot && typeof sourceSlot === "object" ? sourceSlot : {};
-    const scheduleId = _safeTrim(
-        s.scheduleId ||
-        (s.slot && s.slot.scheduleId) ||
-        (s.schedule && s.schedule.id) ||
-        (s.resource && s.resource.scheduleId) ||
-        ""
+    const nestedSlot = s.slot && typeof s.slot === "object" ? s.slot : {};
+    const schedule = s.schedule && typeof s.schedule === "object" ? s.schedule : {};
+    const resource = s.resource && typeof s.resource === "object" ? s.resource : {};
+
+    let scheduleId = _safeTrim(
+        s.scheduleId || nestedSlot.scheduleId || schedule.id || resource.scheduleId
     );
     if (scheduleId && _looksLikeGuid(scheduleId)) return scheduleId;
-    const resolved = await _resolveScheduleIdByResourceId(resourceIdClean);
-    return resolved || null;
+
+    scheduleId = await _resolveScheduleIdByResourceId(resourceIdClean);
+    return scheduleId || null;
 }
 
 // =============================================================================
 // BLOQUE 7 - NORMALIZACION DE SLOTS PARA WRITER V2 (CORE-02, CORE-04)
 // =============================================================================
-// Fuentes aceptadas (por orden): slot.addOnIds, slot.selectedAddOns,
-// slot.customerChoices.addOnIds (forma usada en disponibilidad).
+
+/**
+ * CORE-02: extraccion tolerante de addOnOptions del slot entrante.
+ * Fuentes por orden: slot.addOnIds, slot.selectedAddOns,
+ * slot.customerChoices.addOnIds (forma usada en disponibilidad).
+ * Solo se conservan GUIDs validos, deduplicados.
+ */
 function _extractAddonIdsFromSlot(slot) {
-    const customerChoices = slot && slot.customerChoices ? slot.customerChoices : {};
+    const source = slot && typeof slot === "object" ? slot : {};
+    const customerChoices = source.customerChoices && typeof source.customerChoices === "object"
+        ? source.customerChoices
+        : {};
     const candidates = [].concat(
-        Array.isArray(slot && slot.addOnIds) ? slot.addOnIds : [],
-        Array.isArray(slot && slot.selectedAddOns) ? slot.selectedAddOns : [],
+        Array.isArray(source.addOnIds) ? source.addOnIds : [],
+        Array.isArray(source.selectedAddOns) ? source.selectedAddOns : [],
         Array.isArray(customerChoices.addOnIds) ? customerChoices.addOnIds : []
     );
     const clean = candidates
@@ -434,25 +462,31 @@ function _extractAddonIdsFromSlot(slot) {
     return Array.from(new Set(clean));
 }
 
+/** Convierte cualquier forma de fecha de slot a string local Madrid sin Z. */
 function _toMadridLocalString(rawValue) {
     if (rawValue instanceof Date) {
-        return isNaN(rawValue.getTime()) ? "" : getMadridLocalStringNoZ(rawValue);
+        return Number.isNaN(rawValue.getTime()) ? "" : getMadridLocalStringNoZ(rawValue);
     }
     if (typeof rawValue === "string") {
         const trimmed = _safeTrim(rawValue);
         if (!trimmed) return "";
         if (trimmed.endsWith("Z")) {
             const utcDt = new Date(trimmed);
-            return isNaN(utcDt.getTime()) ? "" : getMadridLocalStringNoZ(utcDt);
+            return Number.isNaN(utcDt.getTime()) ? "" : getMadridLocalStringNoZ(utcDt);
         }
         return _normalizeLocalIsoStr(trimmed);
     }
     return "";
 }
 
-// Construye el objeto con forma bookingInfo que exige Bookings Writer V2
-// (Biblia 2.2.1 / 3.3): timezone en minusculas y locationType OWNER_BUSINESS.
-// Devuelve null ante cualquier dato no certificable (fail-fast).
+const CONFIGURED_LOCATION_ID = _safeTrim(SDK_CONFIG && SDK_CONFIG.LOCATION_ID);
+
+/**
+ * Construye el objeto con forma bookingInfo que exige Bookings Writer V2 para
+ * createBooking (BIBLIA 2.2.1 / 3.3): timezone en minusculas y locationType
+ * OWNER_BUSINESS. Devuelve null ante cualquier dato no certificable (fail-fast):
+ * fallar aqui es barato; fallar en Wix deja reservas huerfanas.
+ */
 export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverride, defaultDurationMinutes) {
     if (!slot || typeof slot !== "object") return null;
 
@@ -498,20 +532,21 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
             localStartDate: localStartDate,
             localEndDate: localEndDate,
             resourceId: resourceIdClean,
-            serviceId: serviceId,
+            serviceId: serviceId
         });
         return null;
     }
 
-    // CORE-04: si el slot trae OTRA ubicacion, fail-fast. Nunca se sustituye en
-    // silencio: crearia la reserva en un local equivocado.
+    // CORE-04: la ubicacion entrante se valida contra la configurada. Si el slot
+    // trae OTRA ubicacion, fail-fast: nunca se sustituye en silencio (crearia la
+    // reserva en un local equivocado).
     const slotLocation = slot.location && typeof slot.location === "object" ? slot.location : {};
     const incomingLocationId = _safeTrim(slotLocation.id);
     if (incomingLocationId && CONFIGURED_LOCATION_ID && incomingLocationId !== CONFIGURED_LOCATION_ID) {
         log.error("_forceStaffInPristineSlot: slot location conflicts with configured location", {
             slotLocationId: incomingLocationId,
             configuredLocationId: CONFIGURED_LOCATION_ID,
-            serviceId: serviceId,
+            serviceId: serviceId
         });
         return null;
     }
@@ -520,14 +555,15 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
     if (!locationId || !_looksLikeGuid(locationId)) {
         log.error("_forceStaffInPristineSlot: missing or invalid LOCATION_ID", {
             configuredLocationId: CONFIGURED_LOCATION_ID,
-            incomingLocationId: incomingLocationId,
+            incomingLocationId: incomingLocationId
         });
         return null;
     }
 
-    // Biblia 2.2.1 fila 8: creacion SIEMPRE con OWNER_BUSINESS.
+    // BIBLIA 2.2.1 fila 8 y 3.3: creacion SIEMPRE con OWNER_BUSINESS y timezone
+    // en minusculas.
     let locationType = _safeTrim(
-        SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.BOOKINGS_WRITER
+        SDK_CONFIG && SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.BOOKINGS_WRITER
     );
     if (!locationType || locationType === "BUSINESS") locationType = "OWNER_BUSINESS";
 
@@ -536,13 +572,14 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         scheduleId: scheduleId,
         startDate: startDate.toISOString(),
         endDate: endDate.toISOString(),
-        timezone: _safeTrim(SDK_CONFIG.TZ) || "Europe/Madrid",
+        timezone: _safeTrim(SDK_CONFIG && SDK_CONFIG.TZ) || "Europe/Madrid",
         resource: { id: resourceIdClean },
-        location: { id: locationId, locationType: locationType },
+        location: { id: locationId, locationType: locationType }
     };
 
-    // CORE-02: se emiten ambas claves porque el contrato del Writer V2 ha usado
-    // historicamente addOnIds y selectedAddOns.
+    // CORE-02: preservar addOnOptions para createBooking. Se emiten ambas claves
+    // porque bookingSaga inyecta addOnIds + selectedAddOns y el contrato del
+    // Writer V2 ha usado historicamente las dos formas.
     const addOnIds = _extractAddonIdsFromSlot(slot);
     if (addOnIds.length > 0) {
         result.addOnIds = addOnIds.slice();
@@ -556,18 +593,22 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
 // =============================================================================
 export function _extractCheckoutId(checkoutSession) {
     if (!checkoutSession || typeof checkoutSession !== "object") return null;
-    if (checkoutSession.checkout && checkoutSession.checkout._id) {
-        return checkoutSession.checkout._id;
-    }
-    return checkoutSession._id || null;
+    const nested = checkoutSession.checkout && typeof checkoutSession.checkout === "object"
+        ? checkoutSession.checkout
+        : {};
+    return _safeTrim(nested._id) || _safeTrim(checkoutSession._id) || null;
 }
 
 // =============================================================================
 // BLOQUE 9 - SLOT KEYS (CORE-13)
 // =============================================================================
-// Formato: slot_<servicePrefix8>_<resourceIdGUID>_<startEpochMin>_<endEpochMin>
-// Los GUID usan guiones (nunca "_"), por lo que el parseo por separador es
-// determinista y permite al mutex satisfacer el requisito resourceId del hook.
+/**
+ * CORE-13: la clave embebe el resourceId COMPLETO para que el mutex pueda
+ * satisfacer el requisito resourceId del hook de ControlOperativo sin cambiar la
+ * firma publica de _lockSlotKeyOrFail. Los GUID usan guiones (nunca "_"), por lo
+ * que el parseo por separador es determinista.
+ * Formato: slot_<servicePrefix8>_<resourceId>_<startEpochMin>_<endEpochMin>
+ */
 export function generateSlotKey(serviceId, resourceId, startDate, endDate) {
     const startUtc = startDate instanceof Date
         ? startDate
@@ -595,7 +636,10 @@ export function generateSlotKey(serviceId, resourceId, startDate, endDate) {
     return "slot_" + servicePrefix + "_" + res + "_" + startEpochMin + "_" + endEpochMin;
 }
 
-// Unico parser del formato anterior. Devuelve "" si la clave no es reconocible.
+/**
+ * Unico parser del formato anterior. Cinco piezas exactas y prefijo "slot".
+ * Devuelve "" si la clave no es reconocible: el mutex falla cerrado.
+ */
 export function _parseResourceIdFromSlotKey(slotKey) {
     const parts = String(slotKey || "").split("_");
     if (parts.length !== 5 || parts[0] !== "slot") return "";
@@ -627,12 +671,12 @@ export function _buildLockKeys(phases, resourceId) {
                 return "";
             }
         })
-        .filter(function (key) { return !!key; });
+        .filter(function (key) { return Boolean(key); });
     return Array.from(new Set(keys)).sort();
 }
 
 // =============================================================================
-// BLOQUE 10 - MUTEX LOCKS EN ControlOperativo (SLOT_LOCK)
+// BLOQUE 10 - MUTEX LOCKS EN ControlOperativo (SLOT_LOCK) - CORE-09/12/13
 // =============================================================================
 const MUTEX_TTL_MS = Number(CONCURRENCY && CONCURRENCY.MS_TTL_MUTEX);
 if (!Number.isFinite(MUTEX_TTL_MS) || MUTEX_TTL_MS <= 0) {
@@ -648,19 +692,14 @@ export function safeLockId(key) {
     return "lk" + _hashKey(k) + k.slice(0, 24);
 }
 
-// CORE-12 / CORE-21: documento canonico de ControlOperativo/SLOT_LOCK.
-// El hook (Biblia 12.2) exige controlType, dedupeKey, traceId y, para SLOT_LOCK,
-// resourceId + expiresAt. El propietario vive en payloadJson, no en campos
-// fuera de esquema.
+/**
+ * CORE-12: documento canonico de ControlOperativo/SLOT_LOCK.
+ * Exigidos por el hook (BIBLIA 12.2): controlType, dedupeKey, traceId, y para
+ * SLOT_LOCK ademas resourceId y expiresAt. El propietario del lock vive en
+ * payloadJson, que es el campo previsto para el contenido especifico del tipo.
+ */
 export function _buildSlotLockControl(slotClave, lockOwnerId, ttlMs, existing) {
     const resourceId = _parseResourceIdFromSlotKey(slotClave);
-    if (!resourceId) {
-        throw createBookingError(
-            ERROR_CODES.LOCK_KEY_OR_OWNER_INVALID,
-            "Slot key does not carry a valid resourceId; ControlOperativo SLOT_LOCK requires it",
-            { slotKey: _safeTrim(slotClave) }
-        );
-    }
     const ttl = Number(ttlMs);
     return {
         _id: safeLockId(slotClave),
@@ -670,9 +709,9 @@ export function _buildSlotLockControl(slotClave, lockOwnerId, ttlMs, existing) {
         expiresAt: new Date(Date.now() + (Number.isFinite(ttl) && ttl > 0 ? ttl : MUTEX_TTL_MS)),
         payloadJson: JSON.stringify({
             lockOwnerId: String(lockOwnerId || ""),
-            lockStatus: "ACTIVE",
+            lockStatus: "ACTIVE"
         }),
-        traceId: _safeTrim(existing && existing.traceId) || makeTraceId("lock"),
+        traceId: _safeTrim(existing && existing.traceId) || makeTraceId("lock")
     };
 }
 
@@ -690,7 +729,7 @@ async function _getLock(slotClave) {
 function _getLockOwnerId(lock) {
     if (!lock || typeof lock !== "object") return "";
     const payload = _parsePayloadJson(lock.payloadJson);
-    // lockOwnerId en claro: tolerado solo en lectura para filas pre-CORE-12.
+    // lockOwnerId en claro: tolerado SOLO en lectura para filas pre-CORE-12.
     return _safeTrim(payload.lockOwnerId) || _safeTrim(lock.lockOwnerId) || "";
 }
 
@@ -744,7 +783,7 @@ export async function _unlockSlotKey(slotClave, lockOwnerId) {
     await wixData.remove(LOCKS_COL, existing._id).catch(function (error) {
         log.warn("_unlockSlotKey: remove failed", {
             slotClave: slotClave,
-            error: error && error.message,
+            error: error && error.message
         });
     });
     return { ok: true };
@@ -765,12 +804,10 @@ export async function _renewLock(slotClave, lockOwnerId, ttlMs) {
 }
 
 // =============================================================================
-// BLOQUE 11 - TRANSACCIONES IDEMPOTENTES EN ControlOperativo (CORE-12/16/17)
+// BLOQUE 11 - TRANSACCIONES IDEMPOTENTES EN ControlOperativo - CORE-12/16/17
 // =============================================================================
 // ADR-05: BookingTransactions absorbida en ControlOperativo.
-// CORE-17: discriminador IDEMPOTENCY. La Matriz 3 cita BOOKING_TX como nombre
-// logico de la coleccion absorbida, pero no pertenece al enum canonico de 6
-// valores (Biblia 6.3) y seria rechazado por assertValidEnum en el hook.
+// CORE-17: discriminador IDEMPOTENCY (BOOKING_TX no es un CONTROL_TYPE canonico).
 const TRANSACTIONS_COL = OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO;
 const TX_DEDUPE_PREFIX = "TX_";
 // payloadJson es Text: se acota para no exceder el limite fisico del campo.
@@ -787,7 +824,7 @@ async function _getTransactionById(pairToken) {
         .catch(function () { return null; });
 }
 
-// Normaliza el estado de la transaccion tolerando filas pre-CORE-12.
+/** Normaliza el estado de la transaccion, tolerando filas pre-CORE-12. */
 function _readTransaction(doc) {
     if (!doc) return null;
     const payload = _parsePayloadJson(doc.payloadJson);
@@ -798,7 +835,7 @@ function _readTransaction(doc) {
         ownerTraceId: _safeTrim(payload.ownerTraceId || doc.ownerTraceId),
         error: _safeTrim(payload.error || doc.error),
         bookingId: _safeTrim(payload.bookingId || doc.bookingId),
-        result: payload.result !== undefined ? payload.result : doc.result,
+        result: payload.result !== undefined ? payload.result : doc.result
     };
 }
 
@@ -825,7 +862,7 @@ function _buildTransactionControl(pairToken, state, existingDoc) {
         payloadJson: payloadJson,
         traceId: _safeTrim(existingDoc && existingDoc.traceId) ||
             _safeTrim(state.ownerTraceId) ||
-            makeTraceId("tx"),
+            makeTraceId("tx")
     };
     const bookingId = _safeTrim(payload.bookingId);
     if (bookingId) doc.bookingId = bookingId;
@@ -841,21 +878,29 @@ async function _writeTransaction(pairToken, state, existingDoc) {
         if (!_isDuplicateItemError(error)) {
             log.error("_writeTransaction failed", {
                 pairToken: pairToken,
-                error: error && error.message,
+                error: error && error.message
             });
         }
     }
 }
 
-// CORE-16: veredicto reutilizable del polling. null = seguir esperando.
+/** Veredicto reutilizable del polling. null significa "seguir esperando". */
 function _evaluatePendingTransaction(current, payloadHash) {
     if (!current) return null;
     if (current.payloadHash !== String(payloadHash || "")) {
-        return { success: false, error: ERROR_CODES.PAIR_TOKEN_PAYLOAD_MISMATCH, existing: current };
+        return {
+            success: false,
+            error: ERROR_CODES.PAIR_TOKEN_PAYLOAD_MISMATCH,
+            existing: current
+        };
     }
     if (current.status === "COMPLETED") return { success: true, isNew: false, existing: current };
     if (current.status === "FAILED") {
-        return { success: false, error: ERROR_CODES.TRANSACTION_PREVIOUSLY_FAILED, existing: current };
+        return {
+            success: false,
+            error: ERROR_CODES.TRANSACTION_PREVIOUSLY_FAILED,
+            existing: current
+        };
     }
     return null;
 }
@@ -867,7 +912,7 @@ export async function _initTransaction(pairToken, payloadHash, traceId) {
     const state = {
         status: "PENDING",
         payloadHash: String(payloadHash || ""),
-        ownerTraceId: String(traceId || ""),
+        ownerTraceId: String(traceId || "")
     };
 
     try {
@@ -878,7 +923,7 @@ export async function _initTransaction(pairToken, payloadHash, traceId) {
             // CORE-16: no se lanza; se respeta el contrato {success, error}.
             log.error("_initTransaction: insert failed", {
                 pairToken: id,
-                error: error && error.message,
+                error: error && error.message
             });
             return { success: false, error: ERROR_CODES.DATABASE_ERROR };
         }
@@ -895,11 +940,15 @@ export async function _initTransaction(pairToken, payloadHash, traceId) {
 
         const remainingMs = TRANSACTION_MAX_WAIT_MS - (Date.now() - startTime);
         const delay = Math.min(
-            Math.floor(TRANSACTION_POLL_BASE_MS * Math.pow(2, Math.min(pollAttempt, 3)) * (0.5 + Math.random())),
+            Math.floor(
+                TRANSACTION_POLL_BASE_MS *
+                Math.pow(2, Math.min(pollAttempt, 3)) *
+                (0.5 + Math.random())
+            ),
             remainingMs
         );
         if (delay <= 0) break;
-        pollAttempt++;
+        pollAttempt += 1;
         await new Promise(function (resolve) { setTimeout(resolve, delay); });
     }
 
@@ -908,7 +957,7 @@ export async function _initTransaction(pairToken, payloadHash, traceId) {
         success: false,
         error: ERROR_CODES.TRANSACTION_TIMEOUT,
         existing: finalState,
-        timeout: true,
+        timeout: true
     };
 }
 
@@ -922,7 +971,7 @@ export async function _completeTransaction(pairToken, result, traceId) {
         payloadHash: current ? current.payloadHash : "",
         ownerTraceId: _safeTrim(traceId) || (current ? current.ownerTraceId : ""),
         bookingId: _extractBookingIdFromResult(result),
-        result: result === undefined ? null : result,
+        result: result === undefined ? null : result
     }, current ? current.doc : null);
 }
 
@@ -935,16 +984,16 @@ export async function _failTransaction(pairToken, errorMessage) {
         status: "FAILED",
         payloadHash: current ? current.payloadHash : "",
         ownerTraceId: current ? current.ownerTraceId : "",
-        error: String(errorMessage || ERROR_CODES.UNKNOWN_ERROR),
+        error: String(errorMessage || ERROR_CODES.UNKNOWN_ERROR)
     }, current ? current.doc : null);
 }
 
 // =============================================================================
-// BLOQUE 12 - PERSISTENCIA EN CITAS_F2 (CORE-09/10/11/18/19/20)
+// BLOQUE 12 - PERSISTENCIA EN CITAS_F2 (CORE-09/10/11)
 // =============================================================================
 const CITAS_COL = BUSINESS_COLLECTIONS.CITAS_F2;
 
-// Biblia 0.5.8 / RGPD: minimizacion. Solo lo imprescindible para la reserva.
+/** BIBLIA 0.5.8 / RGPD: minimizacion. Solo lo imprescindible para la reserva. */
 function _minimizeContactDetails(contactDetails) {
     const cd = contactDetails && typeof contactDetails === "object" ? contactDetails : {};
     const out = {};
@@ -962,33 +1011,22 @@ function _minimizeContactDetails(contactDetails) {
 function _normalizeMeta(rawMeta, overrides) {
     let meta = rawMeta;
     if (typeof meta === "string") {
-        try { meta = JSON.parse(meta); } catch (_) { meta = {}; }
+        try {
+            meta = JSON.parse(meta);
+        } catch (_) {
+            meta = {};
+        }
     }
     if (!meta || typeof meta !== "object" || Array.isArray(meta)) meta = {};
     return Object.assign({}, meta, overrides);
 }
 
-// CORE-20: respeta el dateYmd aportado por la saga si es valido; si no, lo
-// deriva del inicio del slot en Europe/Madrid.
-function _resolveDateYmd(explicitValue, startDateObj, bookingId, traceId) {
-    const explicit = _safeTrim(explicitValue);
-    if (/^\d{4}-\d{2}-\d{2}$/.test(explicit)) return explicit;
-    const startLocal = getMadridLocalStringNoZ(startDateObj);
-    const derived = startLocal ? startLocal.slice(0, 10) : "";
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(derived)) {
-        throw createBookingError(
-            ERROR_CODES.INVALID_DATES,
-            "Cannot derive dateYmd (Europe/Madrid) from slotStart",
-            { traceId: traceId, bookingId: bookingId, startLocal: startLocal }
-        );
-    }
-    return derived;
-}
-
-// Persiste la proyeccion interna de la reserva en CitasF2.
-// CORE-09: sin suppressHooks. El documento se construye cumpliendo el contrato
-// de CitasF2_beforeInsert (enums CMS, traceId, coherencia pairToken) para que
-// el hook lo acepte en vez de intentar esquivarlo.
+/**
+ * Persiste la proyeccion interna de la reserva en CitasF2.
+ * CORE-09: sin suppressHooks. El documento se construye cumpliendo el contrato de
+ * CitasF2_beforeInsert (enums CMS, traceId, coherencia pairToken) para que el
+ * hook lo acepte en vez de intentar esquivarlo.
+ */
 export async function _persistBooking(params, traceId) {
     const p = params || {};
 
@@ -1005,10 +1043,11 @@ export async function _persistBooking(params, traceId) {
     const serviceId = _safeTrim(p.serviceId);
     const resourceId = _safeTrim(p.resourceId);
     if (!bookingId || !serviceId || !resourceId || !p.startDate || !p.endDate) {
-        throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Missing required fields for persistBooking", {
-            traceId: traceIdClean,
-            bookingId: bookingId,
-        });
+        throw createBookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "Missing required fields for persistBooking",
+            { traceId: traceIdClean, bookingId: bookingId }
+        );
     }
 
     const scheduleIdClean = _safeTrim(p.scheduleId);
@@ -1023,73 +1062,61 @@ export async function _persistBooking(params, traceId) {
     const startDateObj = _toDateSafe(p.startDate);
     const endDateObj = _toDateSafe(p.endDate);
     if (!startDateObj || !endDateObj || endDateObj.getTime() <= startDateObj.getTime()) {
-        throw createBookingError(ERROR_CODES.INVALID_DATES, "Invalid startDate/endDate for persistBooking", {
-            traceId: traceIdClean,
-            bookingId: bookingId,
-        });
-    }
-
-    const dateYmd = _resolveDateYmd(p.dateYmd, startDateObj, bookingId, traceIdClean);
-
-    const bookingType = normalizeBookingType(p.bookingType || p.tipo);
-    const pairToken = _safeTrim(p.pairToken || (p.meta && p.meta.pairToken));
-    // Biblia 5.4: pairToken identico en las filas DUAL_F1 y DUAL_F2.
-    if (isDualBookingType(bookingType) && !pairToken) {
-        throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Missing pairToken for linked booking", {
-            traceId: traceIdClean,
-            bookingId: bookingId,
-            bookingType: bookingType,
-        });
-    }
-
-    // CORE-19: importe obligatorio y finito. Un 0 silenciado romperia el cuadre
-    // taxBase+cuota del ledger y el cierre Z (Biblia Prioridad 1 y 3).
-    const rawAmount = p.totalAmount !== undefined
-        ? p.totalAmount
-        : (p.meta && p.meta.totalAmount !== undefined ? p.meta.totalAmount : null);
-    const totalAmount = _roundMoney(Number(rawAmount));
-    if (rawAmount === null || rawAmount === undefined || !Number.isFinite(totalAmount) || totalAmount < 0) {
         throw createBookingError(
-            ERROR_CODES.INVALID_PAYLOAD,
-            "totalAmount is required and must be a finite number >= 0 for CitasF2",
-            { traceId: traceIdClean, bookingId: bookingId, totalAmountRaw: rawAmount }
+            ERROR_CODES.INVALID_DATES,
+            "Invalid startDate/endDate for persistBooking",
+            { traceId: traceIdClean, bookingId: bookingId }
         );
     }
 
-    // CORE-11: traduccion unica al enum persistido + validacion runtime.
+    const startLocal = getMadridLocalStringNoZ(startDateObj);
+    const dateYmd = startLocal ? startLocal.slice(0, 10) : "";
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateYmd)) {
+        throw createBookingError(
+            ERROR_CODES.INVALID_DATES,
+            "Cannot derive dateYmd (Europe/Madrid) from slotStart",
+            { traceId: traceIdClean, bookingId: bookingId, startLocal: startLocal }
+        );
+    }
+
+    const bookingType = normalizeBookingType(p.bookingType || p.tipo);
+    const pairToken = _safeTrim(p.pairToken || (p.meta && p.meta.pairToken));
+    // BIBLIA 5.4: pairToken identico en las filas DUAL_F1 y DUAL_F2.
+    if (isDualBookingType(bookingType) && !pairToken) {
+        throw createBookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "Missing pairToken for linked booking",
+            { traceId: traceIdClean, bookingId: bookingId, bookingType: bookingType }
+        );
+    }
+
+    // CORE-11: traduccion unica al enum persistido + validacion runtime (0.5.6).
+    const metaObj = p.meta && typeof p.meta === "object" ? p.meta : {};
     const rawPayment = p.paymentStatus !== undefined
         ? p.paymentStatus
-        : (p.meta && p.meta.paymentStatus !== undefined ? p.meta.paymentStatus : PAYMENT_STATUS.NOT_PAID);
+        : (metaObj.paymentStatus !== undefined ? metaObj.paymentStatus : PAYMENT_STATUS.NOT_PAID);
     const paymentStatus = _toCmsPaymentStatus(rawPayment);
     const rawBookingStatus = p.bookingStatus !== undefined ? p.bookingStatus : p.status;
-    const bookingStatus = _toCmsBookingStatus(rawBookingStatus) || _deriveCmsBookingStatus(paymentStatus);
+    const bookingStatus = _toCmsBookingStatus(rawBookingStatus) ||
+        _deriveCmsBookingStatus(paymentStatus);
     assertValidEnum(bookingStatus, CMS_BOOKING_STATUS, "bookingStatus");
     assertValidEnum(paymentStatus, CMS_PAYMENT_STATUS, "paymentStatus");
 
-    // CORE-18: thirdPartyId es FK obligatoria a DatosFiscales.taxId. Al eliminarse
-    // MapaStaff, la unica fuente del NIF del profesional es DatosFiscales
-    // (recordType STAFF_CONFIG). Se resuelve aqui si el llamante no lo aporta.
-    let thirdPartyId = _safeTrim(p.thirdPartyId || (p.meta && p.meta.thirdPartyId));
+    // ADR PENDIENTE: thirdPartyId es FK obligatoria a DatosFiscales.taxId, pero una
+    // reserva online anonima no tiene ficha fiscal. Se persiste vacio y se traza.
+    const thirdPartyId = _safeTrim(p.thirdPartyId || metaObj.thirdPartyId);
     if (!thirdPartyId) {
-        thirdPartyId = await getStaffThirdPartyId(resourceId).catch(function (error) {
-            log.warn("getStaffThirdPartyId failed", {
-                traceId: traceIdClean,
-                resourceId: resourceId,
-                error: error && error.message,
-            });
-            return "";
-        });
-    }
-    if (!thirdPartyId) {
-        log.warn("CitasF2 persisted without thirdPartyId: no staff fiscal record in DatosFiscales", {
+        log.warn("CitasF2 persisted without thirdPartyId (ADR pendiente: ficha fiscal de cliente anonimo)", {
             traceId: traceIdClean,
-            bookingId: bookingId,
-            resourceId: resourceId,
+            bookingId: bookingId
         });
     }
 
-    // Biblia 5.4: catalogId apunta a ServiciosCatalogo.serviceId.
+    // BIBLIA 5.4: catalogId apunta a ServiciosCatalogo.serviceId.
     const catalogId = _safeTrim(p.catalogId) || serviceId;
+    const totalAmount = _roundMoney(Number(
+        p.totalAmount !== undefined ? p.totalAmount : (metaObj.totalAmount || 0)
+    ) || 0);
 
     const doc = {
         bookingId: bookingId,
@@ -1105,14 +1132,17 @@ export async function _persistBooking(params, traceId) {
         slotEnd: endDateObj,
         bookingType: bookingType,
         revision: Number(p.revision) || 1,
-        totalAmount: totalAmount,
         // ADR-06: se escribe SOLO el campo fisico canonico. El alias legacy
         // "status" se tolera unicamente en lectura y nunca se persiste.
         [BOOKING_FIELDS.STATUS]: bookingStatus,
         paymentStatus: paymentStatus,
+        totalAmount: totalAmount,
         contactDetails: _minimizeContactDetails(p.contactDetails),
-        meta: _normalizeMeta(p.meta, { bookingStatus: bookingStatus, paymentStatus: paymentStatus }),
-        traceId: traceIdClean,
+        meta: _normalizeMeta(p.meta, {
+            bookingStatus: bookingStatus,
+            paymentStatus: paymentStatus
+        }),
+        traceId: traceIdClean
     };
 
     const existing = await wixData
@@ -1131,7 +1161,7 @@ export async function _persistBooking(params, traceId) {
                 bookingId: bookingId,
                 currentRevision: currentRevision,
                 incomingRevision: incomingRevision,
-                traceId: traceIdClean,
+                traceId: traceIdClean
             });
         }
         const updated = Object.assign({}, existingDoc, doc);
@@ -1166,7 +1196,7 @@ export async function _updateCitaSafe(bookingId, updater, traceId, operation) {
             log.warn("_updateCitaSafe: cita not found", {
                 bookingId: bid,
                 operation: operation,
-                traceId: traceId,
+                traceId: traceId
             });
             return { updated: false, reason: "NOT_FOUND" };
         }
@@ -1175,11 +1205,11 @@ export async function _updateCitaSafe(bookingId, updater, traceId, operation) {
         if (!updated) return { updated: false, reason: "NO_CHANGE" };
 
         // CORE-11: el updater puede devolver nativo Wix, alias ES o el valor ya
-        // canonico. Se normaliza siempre antes de escribir y se valida en runtime.
+        // canonico. Se normaliza SIEMPRE antes de escribir y se valida en runtime.
         // Las filas legacy que solo traen "status" quedan migradas de paso.
         const rawStatus = updated.bookingStatus !== undefined ? updated.bookingStatus : updated.status;
-        const nextBookingStatus = _toCmsBookingStatus(rawStatus) || _toCmsBookingStatus(cita.bookingStatus);
-        const nextPaymentStatus = _toCmsPaymentStatus(updated.paymentStatus) || _toCmsPaymentStatus(cita.paymentStatus);
+        const nextBookingStatus = _toCmsBookingStatus(rawStatus) || cita.bookingStatus;
+        const nextPaymentStatus = _toCmsPaymentStatus(updated.paymentStatus) || cita.paymentStatus;
         assertValidEnum(nextBookingStatus, CMS_BOOKING_STATUS, "bookingStatus");
         assertValidEnum(nextPaymentStatus, CMS_PAYMENT_STATUS, "paymentStatus");
 
@@ -1198,7 +1228,7 @@ export async function _updateCitaSafe(bookingId, updater, traceId, operation) {
             bookingId: bid,
             operation: operation,
             traceId: traceId,
-            error: err && err.message,
+            error: err && err.message
         });
         return { updated: false, reason: "ERROR", error: err && err.message };
     }
@@ -1207,9 +1237,11 @@ export async function _updateCitaSafe(bookingId, updater, traceId, operation) {
 // =============================================================================
 // BLOQUE 14 - EXTRACCION DE RESOURCEIDS DESDE SLOTS (CORE-01)
 // =============================================================================
-// Delegacion total en bookingUtils.getResourceIdsFromSlot (unica implementacion;
-// reservas.web importa el mismo helper). Cubre las cuatro variantes de
-// resourceType y las tres de resource id que devuelve Wix.
+/**
+ * CORE-01: delegacion total en bookingUtils.getResourceIdsFromSlot (unica
+ * implementacion; reservas.web importa el mismo helper). Cubre las cuatro
+ * variantes de resourceType y las tres de resource id que devuelve Wix.
+ */
 export function _extractResourceIdsFromSlot(slot) {
     return getResourceIdsFromSlot(slot, STAFF_RESOURCE_TYPE_ID);
 }
@@ -1217,16 +1249,18 @@ export function _extractResourceIdsFromSlot(slot) {
 // =============================================================================
 // BLOQUE 15 - VERIFICACION DE CONTIGUIDAD / GAP ENTRE SLOTS
 // =============================================================================
-// Regla del dual con gap (Biblia 1.2 / 11.2): entre el fin de F1 y el inicio de
-// F2 debe existir un hueco de exposicion con el profesional libre. Se admite
-// solape tecnico de hasta 1 minuto por redondeos de slot.
+/**
+ * Regla de negocio del dual con gap (BIBLIA 1.2 / 11.2): entre el fin de F1 y el
+ * inicio de F2 debe existir un hueco de exposicion durante el cual el profesional
+ * queda libre. Se admite solape tecnico de hasta 1 minuto por redondeos de slot.
+ */
 export function _areSlotsContiguous(slot1, slot2, maxGapMinutes) {
     if (!slot1 || !slot2) return false;
 
-    // SSOT: sin limite explicito del llamante, la tolerancia canonica es
-    // SLOT_SEARCH.MINUTOS_TOLERANCIA (Biblia 3.2.1 f12), no un magic number.
+    // SSOT: sin limite explicito del llamador, la tolerancia canonica es
+    // SLOT_SEARCH.MINUTOS_TOLERANCIA (BIBLIA 3.2.1 f12), no un magic number.
     const fallbackTolerance = Number(SLOT_SEARCH && SLOT_SEARCH.MINUTOS_TOLERANCIA);
-    const maxGap = maxGapMinutes == null
+    const maxGap = maxGapMinutes === null || maxGapMinutes === undefined
         ? (Number.isFinite(fallbackTolerance) ? fallbackTolerance : 120)
         : Number(maxGapMinutes);
 
@@ -1246,6 +1280,11 @@ export function _areSlotsContiguous(slot1, slot2, maxGapMinutes) {
 // =============================================================================
 // BLOQUE 16 - PROYECCION DE SLOTS CERTIFICADOS Y WRITER (CORE-03, CORE-04)
 // =============================================================================
+/**
+ * CORE-04: locationId validado contra SDK_CONFIG.LOCATION_ID. Slot con otra
+ * ubicacion -> null (fail-fast, nunca sustitucion silenciosa). Sin ubicacion util
+ * o sin GUID -> null.
+ */
 export function _projectCertifiedSlot(slot, resourceId) {
     if (!slot || typeof slot !== "object") return null;
 
@@ -1270,7 +1309,7 @@ export function _projectCertifiedSlot(slot, resourceId) {
         log.warn("_projectCertifiedSlot: slot location does not match configured location", {
             slotLocationId: slotLocationId,
             configuredLocationId: CONFIGURED_LOCATION_ID,
-            serviceId: serviceId,
+            serviceId: serviceId
         });
         return null;
     }
@@ -1280,30 +1319,35 @@ export function _projectCertifiedSlot(slot, resourceId) {
         log.warn("_projectCertifiedSlot: missing or invalid locationId", {
             slotLocationId: slotLocationId,
             configuredLocationId: CONFIGURED_LOCATION_ID,
-            serviceId: serviceId,
+            serviceId: serviceId
         });
         return null;
     }
 
+    const nestedSlot = slot.slot && typeof slot.slot === "object" ? slot.slot : {};
     return {
         serviceId: serviceId,
         resourceId: resourceIdClean,
-        scheduleId: _safeTrim(slot.scheduleId || (slot.slot && slot.slot.scheduleId)),
+        scheduleId: _safeTrim(slot.scheduleId || nestedSlot.scheduleId),
         localStartDate: localStartDate,
         localEndDate: localEndDate,
         startDate: startDateUtc,
         endDate: endDateUtc,
         bookable: slot.bookable === true,
         availableResources: _extractResourceIdsFromSlot(slot),
-        timezone: _safeTrim(SDK_CONFIG.TZ) || "Europe/Madrid",
+        timezone: _safeTrim(SDK_CONFIG && SDK_CONFIG.TZ) || "Europe/Madrid",
         locationId: locationId,
         locationName: _safeTrim(slotLocation.name),
-        formattedAddress: _safeTrim(slotLocation.formattedAddress),
+        formattedAddress: _safeTrim(slotLocation.formattedAddress)
     };
 }
 
-// CORE-03: el Writer V2 exige scheduleId GUID valido (Biblia 2.2.1 fila 4).
-// Sin scheduleId util devuelve null EN VEZ de proyectar scheduleId vacio.
+/**
+ * CORE-03: el Writer V2 exige scheduleId GUID valido (BIBLIA 2.2.1 fila 4).
+ * Cascada: projected -> slot -> slot.slot. Sin scheduleId util devuelve null EN
+ * VEZ de proyectar scheduleId vacio (que Wix rechazaria en createBooking).
+ * Nomenclatura V2 preservada: timezone en minusculas + OWNER_BUSINESS.
+ */
 export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) {
     const projected = _projectCertifiedSlot(slot, resourceId);
     if (!projected) return null;
@@ -1311,21 +1355,20 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
     const finalServiceId = _safeTrim(serviceId) || projected.serviceId;
     if (!finalServiceId || !_looksLikeGuid(finalServiceId)) return null;
 
+    const nestedSlot = slot.slot && typeof slot.slot === "object" ? slot.slot : {};
     const scheduleId = _safeTrim(
-        projected.scheduleId ||
-        slot.scheduleId ||
-        (slot.slot && slot.slot.scheduleId)
+        projected.scheduleId || slot.scheduleId || nestedSlot.scheduleId
     );
     if (!scheduleId || !_looksLikeGuid(scheduleId)) {
         log.warn("_projectWriterSlotFromAvailability: missing or invalid scheduleId", {
             serviceId: finalServiceId,
-            scheduleIdRaw: projected.scheduleId || null,
+            scheduleIdRaw: projected.scheduleId || null
         });
         return null;
     }
 
     let writerLocationType = _safeTrim(
-        SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.BOOKINGS_WRITER
+        SDK_CONFIG && SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.BOOKINGS_WRITER
     );
     if (!writerLocationType || writerLocationType === "BUSINESS") writerLocationType = "OWNER_BUSINESS";
 
@@ -1336,9 +1379,10 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
         endDate: projected.endDate,
         timezone: projected.timezone,
         resource: { id: projected.resourceId },
-        location: { id: projected.locationId, locationType: writerLocationType },
+        location: { id: projected.locationId, locationType: writerLocationType }
     };
 
+    // CORE-02: propagar addOnOptions si el slot certificado los porta.
     const addOnIds = _extractAddonIdsFromSlot(slot);
     if (addOnIds.length > 0) {
         writerSlot.addOnIds = addOnIds.slice();
@@ -1348,28 +1392,39 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
 }
 
 // =============================================================================
-// BLOQUE 17 - PAIR TOKEN CANONICO COMPARTIDO (CORE-05)
+// BLOQUE 17 - PAIR TOKEN CANONICO COMPARTIDO (CORE-05 + CORE-18)
 // =============================================================================
-// La huella debe ser IDENTICA en los tres puntos donde se genera o consume un
-// pairToken:
-//   reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
-//   bookingSaga._resolveUnifiedPairToken         (consumidor / reemisor)
-//   ControlOperativo (IDEMPOTENCY).payloadHash   (persistencia)
-// Los 8 campos son obligatorios: serviceId, linkedPhases, dateYmd, f1Start,
-// f1End, f2Start, f2End, resourceId. Cualquier cambio rompe la correlacion.
-export function _buildPairTokenDeterministic(input) {
-    return _hashKey(_buildPairFingerprint(input || {}));
-}
+/**
+ * CORE-18: la definicion canonica de la huella y del token vive en
+ * backend/booking/bookingUtils.js (capa de utilidades puras). Aqui solo se
+ * reexporta la superficie publica historica que consumen bookingSaga y
+ * reservas.web. Cero duplicacion de logica (BIBLIA 0.5.1) y cero ciclos:
+ * la precedencia es mmUtils > bookingUtils > bookingCore > *.web.js.
+ *
+ * La huella debe ser IDENTICA en los tres puntos donde se genera o consume un
+ * pairToken:
+ *   reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
+ *   bookingSaga._resolveUnifiedPairToken         (verificador / reemisor)
+ *   CitasF2.pairToken + ControlOperativo._id     (persistencia e idempotencia)
+ * Los 8 campos del contrato (serviceId, linkedPhases, dateYmd, f1Start, f1End,
+ * f2Start, f2End, resourceId) se normalizan dentro de _buildPairFingerprint.
+ */
+export { _buildPairFingerprint, _buildPairTokenDeterministic };
 
 // =============================================================================
 // BLOQUE 18 - RANKING DE RECURSOS POR CARGA (CORE-14, CORE-15)
 // =============================================================================
-// Ordena los recursos disponibles de menor a mayor carga del dia. Nunca deja la
-// lista sin recursos: ante cualquier fallo devuelve el orden de disponibilidad.
+/**
+ * Ordena los recursos disponibles de menor a mayor carga del dia para repartir
+ * trabajo. Nunca deja la lista sin recursos: ante cualquier fallo devuelve el
+ * orden original de disponibilidad.
+ */
 export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
     const input = Array.isArray(resourceIds)
         ? Array.from(new Set(
-            resourceIds.map(function (id) { return _safeTrim(id); }).filter(_looksLikeGuid)
+            resourceIds
+                .map(function (id) { return _safeTrim(id); })
+                .filter(_looksLikeGuid)
         ))
         : [];
     if (input.length < 2) return input;
@@ -1390,9 +1445,8 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
         let skip = 0;
         let hasMore = true;
         while (hasMore) {
-            // CORE-14: .in() no existe en wix-data ni en dataLegacyAdapter
-            // (verificado contra el builder real: eq/ne/gt/ge/lt/le/hasSome/
-            // startsWith/contains). .hasSome() se traduce a $hasSome en WQL.
+            // CORE-14: .in() no existe en wix-data ni en dataLegacyAdapter.
+            // .hasSome() se traduce a $hasSome en WQL (valor scalar en lista).
             const result = await wixData
                 .query(CITAS_COL)
                 .eq("dateYmd", day)
@@ -1402,7 +1456,7 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
                 .find({ consistentRead: true });
 
             const items = result && Array.isArray(result.items) ? result.items : [];
-            for (let i = 0; i < items.length; i++) {
+            for (let i = 0; i < items.length; i += 1) {
                 const item = items[i];
                 const itemResourceId = _safeTrim(item && item.resourceId);
                 if (!loads[itemResourceId]) continue;
@@ -1412,7 +1466,7 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
                 const payment = _toCmsPaymentStatus((item && item.paymentStatus) || "");
                 const inactive = status === CMS_BOOKING_STATUS.CANCELLED ||
                     status === CMS_BOOKING_STATUS.NO_SHOW;
-                // Solo REFUNDED libera carga: PARTIAL sigue ocupando slot.
+                // Solo REFUNDED libera carga: PARTIAL (pago parcial) sigue ocupando slot.
                 const refunded = payment === CMS_PAYMENT_STATUS.REFUNDED;
                 if (!inactive && !refunded) loads[itemResourceId].load += 1;
             }
@@ -1429,7 +1483,7 @@ export async function _rankResourcesByLoad(resourceIds, dateYmd, traceId) {
         log.warn("_rankResourcesByLoad failed; preserving availability order", {
             traceId: traceId,
             dateYmd: day,
-            error: error && error.message,
+            error: error && error.message
         });
         return input;
     }
