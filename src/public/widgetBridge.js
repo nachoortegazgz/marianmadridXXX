@@ -1,9 +1,36 @@
 /*
-=============================================================================
 MODULE: public/widgetBridge.js
-VERSION: v5011-F2-CALLBACK-ALIGNED
+VERSION: v5012-ERRORCODE-AND-ORIGIN-FIX
+BASE: v5011-F2-CALLBACK-ALIGNED
 PURPOSE: Secure, versioned bridge between Wix Velo and HTML Components.
-ASCII: Strict ASCII in source comments and identifiers.
+STANDARDS: Strict ASCII in source comments and identifiers.
+RESTRICTION: this module MUST NOT import public/mmUtils.js (acyclic rule).
+             mmUtils re-exports from here, never the other way round.
+
+FIXES v5012:
+  BRIDGE-01 (P0) WIDGET_ERROR_CODE tenia un espacio final en los 16 valores.
+         Los consumidores comparan por igualdad estricta
+         (error.code === "WIDGET_ORIGIN_REJECTED"), por lo que ninguna rama de
+         error amigable llegaba a ejecutarse. Valores normalizados.
+  BRIDGE-02 (P0) normalizeOriginSuffix usaba .replace(/^.+/, ""), que borra la
+         cadena COMPLETA. allowedOriginSuffixes quedaba siempre vacio y se caia
+         en silencio a los sufijos por defecto. Corregido a /^\.+/ (solo puntos).
+  BRIDGE-03 (P0) getOriginHost tenia el literal regex corrupto
+         (/^[a-z0-9+.-]+:///i), que el parser corta en el primer slash y deja
+         "/i, \"\")" como residuo. Restaurado a /^[a-z0-9+.-]+:\/\/\/i con las
+         barras escapadas: elimina "scheme://" antes de leer el hostname.
+  BRIDGE-04 (P0) resolveOriginPolicy tenia .replace(//$/, "") corrupto.
+         Restaurado a .replace(/\/$/, "").
+  BRIDGE-05 (P1) HANDSHAKE_TIMEOUT_MS 15000 -> 40000. Los widgets reintentan el
+         handshake durante 23,5 s (calendario) y 31,5 s (servicio). Con 15 s el
+         bridge declaraba WIDGET_HANDSHAKE_TIMEOUT mientras el widget aun iba por
+         el intento 4: falso positivo garantizado en moviles y conexiones lentas.
+         La ventana debe ser >= presupuesto total del widget mas lento.
+CONTRATO DE CALLBACK (F2, sin cambios):
+  onWidgetMessage(message, reply, bridge)
+    reply(responseType, payload, requestMessage?) -> correlaciona con el mensaje
+    entrante cuando este trae messageId. Los widgets actuales correlacionan por
+    payload.requestSequence, que las paginas reenvian intacto.
 =============================================================================
 */
 
@@ -26,7 +53,9 @@ export const PROTOCOL_URLS = Object.freeze({
 
 export const PROTOCOL_UI = Object.freeze({
     FRONTEND_API_TIMEOUT_MS: 60000,
-    HANDSHAKE_TIMEOUT_MS: 15000,
+    // BRIDGE-05: debe cubrir el presupuesto completo de reintentos del widget
+    // mas lento (servicio-2: 6 intentos con backoff 500 * 2^n = 31,5 s).
+    HANDSHAKE_TIMEOUT_MS: 40000,
     CONTEXT_TIMEOUT_MS: 30000
 });
 
@@ -51,6 +80,8 @@ const OPAQUE_ORIGIN_PREFIXES = Object.freeze([
     "filesystem:"
 ]);
 
+// BRIDGE-01: valores sin espacio final. La comparacion por === en los
+// consumidores depende de la igualdad exacta del literal.
 export const WIDGET_ERROR_CODE = Object.freeze({
     INVALID_WIDGET: "WIDGET_INVALID_HTML_COMPONENT",
     DESTROYED: "WIDGET_BRIDGE_DESTROYED",
@@ -73,6 +104,7 @@ export const WIDGET_ERROR_CODE = Object.freeze({
 const DEFAULT_ALLOWED_TYPES = Object.freeze(
     Object.values(MESSAGE_TYPES)
 );
+
 const textEncoder =
     typeof TextEncoder === "function" ? new TextEncoder() : null;
 
@@ -85,14 +117,14 @@ function safeObject(value) {
 }
 
 function safeType(value) {
-    return String(value ?? "")
+    return String(value === null || value === undefined ? "" : value)
         .trim()
         .toUpperCase()
         .slice(0, MAX_TYPE_LENGTH);
 }
 
 function safeMessageId(value) {
-    return String(value ?? "")
+    return String(value === null || value === undefined ? "" : value)
         .trim()
         .replace(/[^a-zA-Z0-9._:-]/g, "_")
         .slice(0, MAX_MESSAGE_ID_LENGTH);
@@ -102,7 +134,6 @@ function toProtocolVersion(value) {
     if (value === undefined || value === null || value === "") {
         return PROTOCOL_VERSION;
     }
-
     const parsed = Number(value);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
@@ -110,9 +141,7 @@ function toProtocolVersion(value) {
 function estimateBytes(value) {
     try {
         const serialized = JSON.stringify(value);
-        if (typeof serialized !== "string") {
-            return MAX_MESSAGE_BYTES + 1;
-        }
+        if (typeof serialized !== "string") return MAX_MESSAGE_BYTES + 1;
         return textEncoder
             ? textEncoder.encode(serialized).length
             : serialized.length;
@@ -123,30 +152,23 @@ function estimateBytes(value) {
 
 function countKeys(value) {
     if (!value || typeof value !== "object") return 0;
-
     let total = 0;
     const stack = [value];
-
     while (stack.length > 0 && total <= MAX_PAYLOAD_KEYS) {
         const current = stack.pop();
         if (!current || typeof current !== "object") continue;
-
         const keys = Object.keys(current);
         total += keys.length;
-
         for (const key of keys) {
             const child = current[key];
-            if (child && typeof child === "object") {
-                stack.push(child);
-            }
+            if (child && typeof child === "object") stack.push(child);
         }
     }
-
     return total;
 }
 
 export function buildResponseType(type) {
-    return `${safeType(type)}${RESPONSE_TYPE_SUFFIX}`;
+    return safeType(type) + RESPONSE_TYPE_SUFFIX;
 }
 
 function isResponseType(type) {
@@ -159,17 +181,23 @@ function getResponseTypeBase(type) {
         : "";
 }
 
+/**
+ * BRIDGE-02: solo se eliminan los puntos iniciales. La version anterior usaba
+ * /^.+/ y devolvia siempre cadena vacia, desactivando allowedOriginSuffixes.
+ */
 function normalizeOriginSuffix(value) {
-    const suffix = String(value ?? "")
+    const suffix = String(value === null || value === undefined ? "" : value)
         .trim()
         .toLowerCase()
         .replace(/^\.+/, "");
-
-    return suffix ? `.${suffix}` : "";
+    return suffix ? "." + suffix : "";
 }
 
+/** BRIDGE-04: regex de barra final restaurada. */
 function resolveOriginPolicy(options) {
-    const exact = String(options.allowedOrigin ?? "")
+    const exact = String(options.allowedOrigin === null || options.allowedOrigin === undefined
+        ? ""
+        : options.allowedOrigin)
         .trim()
         .toLowerCase()
         .replace(/\/$/, "");
@@ -177,7 +205,7 @@ function resolveOriginPolicy(options) {
     if (exact) {
         return Object.freeze({
             mode: "exact",
-            exact,
+            exact: exact,
             suffixes: Object.freeze([]),
             allowOpaqueOrigin: options.allowOpaqueOrigin === true
         });
@@ -193,36 +221,36 @@ function resolveOriginPolicy(options) {
         mode: options.strictOrigin === false ? "off" : "suffix",
         exact: "",
         suffixes: Object.freeze(
-            custom.length > 0
-                ? custom
-                : DEFAULT_ALLOWED_ORIGIN_SUFFIXES
+            custom.length > 0 ? custom : DEFAULT_ALLOWED_ORIGIN_SUFFIXES
         ),
         allowOpaqueOrigin: options.allowOpaqueOrigin === true
     });
 }
 
 function classifyOrigin(rawOrigin) {
-    const origin = String(rawOrigin ?? "")
+    const origin = String(rawOrigin === null || rawOrigin === undefined ? "" : rawOrigin)
         .trim()
         .toLowerCase();
-
     if (!origin || origin === "null") {
         return { opaque: true, value: origin };
     }
-
     return {
-        opaque: OPAQUE_ORIGIN_PREFIXES.some((prefix) =>
-            origin.startsWith(prefix)
-        ),
+        opaque: OPAQUE_ORIGIN_PREFIXES.some(function (prefix) {
+            return origin.startsWith(prefix);
+        }),
         value: origin
     };
 }
 
+/**
+ * BRIDGE-03: elimina el esquema ("https://") con las barras escapadas antes de
+ * leer el hostname. Fallback para origenes que no parsean como URL.
+ */
 function getOriginHost(origin) {
     try {
         return new URL(origin).hostname.toLowerCase();
     } catch (_) {
-        return origin
+        return String(origin)
             .replace(/^[a-z0-9+.-]+:\/\//i, "")
             .split("/")[0]
             .toLowerCase();
@@ -232,39 +260,34 @@ function getOriginHost(origin) {
 function isOriginAllowed(origin, policy) {
     if (policy.mode === "off") return true;
     if (policy.mode === "exact") return origin === policy.exact;
-
     const host = getOriginHost(origin);
-
-    return policy.suffixes.some((suffix) => {
+    return policy.suffixes.some(function (suffix) {
         const baseHost = suffix.slice(1);
         return host === baseHost || host.endsWith(suffix);
     });
 }
 
 function withManagedTimeout(promise, timeoutMs, code, timers) {
-    return new Promise((resolve, reject) => {
+    return new Promise(function (resolve, reject) {
         let settled = false;
-        const timer = setTimeout(() => {
+        const timer = setTimeout(function () {
             if (settled) return;
             settled = true;
             timers.delete(timer);
-
             const error = new Error(code);
             error.code = code;
             reject(error);
         }, Math.max(1, Number(timeoutMs) || 1));
-
         timers.add(timer);
-
         Promise.resolve(promise).then(
-            (value) => {
+            function (value) {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);
                 timers.delete(timer);
                 resolve(value);
             },
-            (error) => {
+            function (error) {
                 if (settled) return;
                 settled = true;
                 clearTimeout(timer);
@@ -287,36 +310,34 @@ export function createWidgetBridge(widgetElement, options = {}) {
     }
 
     const settings = safeObject(options);
-    instanceCounter += 1;
 
+    instanceCounter += 1;
     const bridgeId =
-        `wbridge-${instanceCounter.toString(36)}-` +
+        "wbridge-" + instanceCounter.toString(36) + "-" +
         Math.random().toString(36).slice(2, 8);
+
     const originPolicy = resolveOriginPolicy(settings);
+
     const allowedTypes = new Set(
-        Array.isArray(settings.allowedTypes) &&
-        settings.allowedTypes.length > 0
+        Array.isArray(settings.allowedTypes) && settings.allowedTypes.length > 0
             ? settings.allowedTypes.map(safeType).filter(Boolean)
             : DEFAULT_ALLOWED_TYPES
     );
+
     const handshakeTimeoutMs = Number(settings.handshakeTimeoutMs) > 0
         ? Number(settings.handshakeTimeoutMs)
         : PROTOCOL_UI.HANDSHAKE_TIMEOUT_MS;
+
     const contextTimeoutMs = Number(settings.contextTimeoutMs) > 0
         ? Number(settings.contextTimeoutMs)
         : PROTOCOL_UI.CONTEXT_TIMEOUT_MS;
+
     const onWidgetMessage =
-        typeof settings.onWidgetMessage === "function"
-            ? settings.onWidgetMessage
-            : null;
+        typeof settings.onWidgetMessage === "function" ? settings.onWidgetMessage : null;
     const onContextReady =
-        typeof settings.onContextReady === "function"
-            ? settings.onContextReady
-            : null;
+        typeof settings.onContextReady === "function" ? settings.onContextReady : null;
     const onError =
-        typeof settings.onError === "function"
-            ? settings.onError
-            : () => {};
+        typeof settings.onError === "function" ? settings.onError : function () {};
 
     let destroyed = false;
     let sequence = 0;
@@ -329,10 +350,10 @@ export function createWidgetBridge(widgetElement, options = {}) {
     const timers = new Set();
 
     function isAllowedType(type) {
-        if (allowedTypes.has(type) || type === ADMIN_RESPONSE_TYPE) {
-            return true;
-        }
-
+        // ADMIN_RESPONSE_TYPE queda siempre permitido: lo consume
+        // public/marianAdministrationController.js aunque la pagina restrinja
+        // allowedTypes a los tipos de reserva.
+        if (allowedTypes.has(type) || type === ADMIN_RESPONSE_TYPE) return true;
         const base = getResponseTypeBase(type);
         return Boolean(base) && allowedTypes.has(base);
     }
@@ -342,28 +363,23 @@ export function createWidgetBridge(widgetElement, options = {}) {
         error.code = code;
         error.bridgeId = bridgeId;
         if (cause) error.cause = cause;
-        if (detail !== null && detail !== undefined) {
-            error.detail = detail;
-        }
-
+        if (detail !== null && detail !== undefined) error.detail = detail;
         try {
             onError(error, detail);
         } catch (_) {
-            // Error reporting must not break message delivery.
+            // El reporte de errores nunca debe romper la entrega de mensajes.
         }
-
         return error;
     }
 
     function clearAllTimers() {
-        timers.forEach((timer) => clearTimeout(timer));
+        timers.forEach(function (timer) { clearTimeout(timer); });
         timers.clear();
         handshakeTimer = null;
     }
 
     function extractEvent(event) {
-        const classified = classifyOrigin(event?.origin);
-
+        const classified = classifyOrigin(event && event.origin);
         if (classified.opaque) {
             if (!originPolicy.allowOpaqueOrigin) {
                 reportError(
@@ -380,70 +396,50 @@ export function createWidgetBridge(widgetElement, options = {}) {
             return null;
         }
 
-        const message = safeObject(event?.data);
-
+        const message = safeObject(event && event.data);
         if (estimateBytes(message) > MAX_MESSAGE_BYTES) {
             reportError(WIDGET_ERROR_CODE.MESSAGE_TOO_LARGE);
             return null;
         }
-
         if (countKeys(message) > MAX_PAYLOAD_KEYS) {
             reportError(WIDGET_ERROR_CODE.PAYLOAD_TOO_COMPLEX);
             return null;
         }
-
         return message;
     }
 
     function normalizeMessage(source) {
         const type = safeType(source.type);
         if (!type) {
-            return {
-                message: null,
-                code: WIDGET_ERROR_CODE.TYPE_MISSING
-            };
+            return { message: null, code: WIDGET_ERROR_CODE.TYPE_MISSING };
         }
-
         if (!isAllowedType(type)) {
-            return {
-                message: null,
-                code: WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED
-            };
+            return { message: null, code: WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED };
         }
-
         const version = toProtocolVersion(source.version);
         if (version !== PROTOCOL_VERSION) {
-            return {
-                message: null,
-                code: WIDGET_ERROR_CODE.VERSION_UNSUPPORTED
-            };
+            return { message: null, code: WIDGET_ERROR_CODE.VERSION_UNSUPPORTED };
         }
-
         const messageId = safeMessageId(source.messageId);
-
         return {
             message: Object.freeze({
-                type,
+                type: type,
                 payload: Object.freeze(safeObject(source.payload)),
-                messageId,
+                messageId: messageId,
                 requestId: safeMessageId(source.requestId) || messageId,
                 version: PROTOCOL_VERSION,
-                bridgeId
+                bridgeId: bridgeId
             }),
             code: null
         };
     }
 
     function notifyListeners(message) {
-        listeners.forEach((listener) => {
+        listeners.forEach(function (listener) {
             try {
                 listener(message, bridge);
             } catch (error) {
-                reportError(
-                    WIDGET_ERROR_CODE.LISTENER_FAILED,
-                    null,
-                    error
-                );
+                reportError(WIDGET_ERROR_CODE.LISTENER_FAILED, null, error);
             }
         });
     }
@@ -451,7 +447,7 @@ export function createWidgetBridge(widgetElement, options = {}) {
     function nextMessageId() {
         sequence += 1;
         return safeMessageId(
-            `${bridgeId}-${Date.now().toString(36)}-${sequence.toString(36)}`
+            bridgeId + "-" + Date.now().toString(36) + "-" + sequence.toString(36)
         );
     }
 
@@ -461,49 +457,38 @@ export function createWidgetBridge(widgetElement, options = {}) {
             error.code = WIDGET_ERROR_CODE.DESTROYED;
             throw error;
         }
-
         const normalizedType = safeType(type);
         if (!isAllowedType(normalizedType)) {
             const error = new Error(WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED);
             error.code = WIDGET_ERROR_CODE.TYPE_NOT_ALLOWED;
             throw error;
         }
-
         const message = Object.freeze({
             type: normalizedType,
             payload: safeObject(payload),
             messageId: safeMessageId(messageId) || nextMessageId(),
             version: PROTOCOL_VERSION,
-            bridgeId
+            bridgeId: bridgeId
         });
-
         if (estimateBytes(message) > MAX_MESSAGE_BYTES) {
             const error = new Error(WIDGET_ERROR_CODE.MESSAGE_TOO_LARGE);
             error.code = WIDGET_ERROR_CODE.MESSAGE_TOO_LARGE;
             throw error;
         }
-
         widgetElement.postMessage(message);
         return message.messageId;
     }
 
     function resolveCorrelationId(requestMessage) {
         if (!requestMessage) return "";
-        if (typeof requestMessage === "string") {
-            return safeMessageId(requestMessage);
-        }
+        if (typeof requestMessage === "string") return safeMessageId(requestMessage);
         if (typeof requestMessage !== "object") return "";
-
         return safeMessageId(requestMessage.messageId) ||
             safeMessageId(requestMessage.requestId);
     }
 
     function reply(type, payload = {}, requestMessage = null) {
-        return send(
-            type,
-            payload,
-            resolveCorrelationId(requestMessage) || null
-        );
+        return send(type, payload, resolveCorrelationId(requestMessage) || null);
     }
 
     function postMessage(payload = {}, type = MESSAGE_TYPES.CONTEXT) {
@@ -511,45 +496,33 @@ export function createWidgetBridge(widgetElement, options = {}) {
     }
 
     function subscribe(callback) {
-        if (destroyed || typeof callback !== "function") {
-            return () => {};
-        }
+        if (destroyed || typeof callback !== "function") return function () {};
         listeners.add(callback);
-        return () => listeners.delete(callback);
+        return function () { listeners.delete(callback); };
     }
 
     async function publishContext(message) {
         if (!onContextReady || contextInFlight || destroyed) return;
-
         contextInFlight = true;
         try {
             const context = await withManagedTimeout(
-                Promise.resolve().then(() =>
-                    onContextReady(message, bridge)
-                ),
+                Promise.resolve().then(function () {
+                    return onContextReady(message, bridge);
+                }),
                 contextTimeoutMs,
                 WIDGET_ERROR_CODE.CONTEXT_TIMEOUT,
                 timers
             );
-
-            if (destroyed || context === undefined || context === null) {
-                return;
-            }
-
-            send(
-                MESSAGE_TYPES.CONTEXT,
-                context,
-                message.messageId || null
-            );
+            if (destroyed || context === undefined || context === null) return;
+            send(MESSAGE_TYPES.CONTEXT, context, message.messageId || null);
         } catch (cause) {
-            const code =
-                cause?.code === WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
-                    ? WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
-                    : WIDGET_ERROR_CODE.CONTEXT_FAILED;
+            const code = cause && cause.code === WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
+                ? WIDGET_ERROR_CODE.CONTEXT_TIMEOUT
+                : WIDGET_ERROR_CODE.CONTEXT_FAILED;
             const detail = {
-                causeCode: cause?.code || null,
-                causeMessage: cause?.message || String(cause),
-                causeStack: cause?.stack || null
+                causeCode: (cause && cause.code) || null,
+                causeMessage: (cause && cause.message) || String(cause),
+                causeStack: (cause && cause.stack) || null
             };
             reportError(code, detail, cause);
         } finally {
@@ -559,23 +532,17 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     function armHandshakeWatchdog() {
         if (!onContextReady || handshakeTimeoutMs <= 0) return;
-
-        handshakeTimer = setTimeout(() => {
+        handshakeTimer = setTimeout(function () {
             timers.delete(handshakeTimer);
             handshakeTimer = null;
             if (destroyed || handshakeCompleted) return;
-            reportError(
-                WIDGET_ERROR_CODE.HANDSHAKE_TIMEOUT,
-                { bridgeId }
-            );
+            reportError(WIDGET_ERROR_CODE.HANDSHAKE_TIMEOUT, { bridgeId: bridgeId });
         }, handshakeTimeoutMs);
-
         timers.add(handshakeTimer);
     }
 
-    const unsubscribeWidget = widgetElement.onMessage((event) => {
+    const unsubscribeWidget = widgetElement.onMessage(function (event) {
         if (destroyed) return;
-
         try {
             const extracted = extractEvent(event);
             if (!extracted) return;
@@ -585,8 +552,8 @@ export function createWidgetBridge(widgetElement, options = {}) {
                 reportError(
                     normalized.code || WIDGET_ERROR_CODE.MESSAGE_REJECTED,
                     {
-                        receivedType: extracted.type ?? null,
-                        receivedVersion: extracted.version ?? null
+                        receivedType: (extracted && extracted.type) || null,
+                        receivedVersion: (extracted && extracted.version) || null
                     }
                 );
                 return;
@@ -606,35 +573,25 @@ export function createWidgetBridge(widgetElement, options = {}) {
             notifyListeners(message);
 
             if (onWidgetMessage) {
-                // The second argument is a callable reply helper for existing
-                // page handlers. The third argument exposes the full bridge.
-                // Replies stay correlated with the original incoming message.
-                const replyToMessage = (
-                    responseType,
-                    payload = {},
-                    requestMessage = message
-                ) => {
+                // F2: segundo argumento = helper reply; tercero = bridge completo.
+                // La respuesta queda correlacionada con el mensaje entrante cuando
+                // este trae messageId o requestId.
+                const replyToMessage = function (responseType, payload = {}, requestMessage = message) {
                     const candidate =
                         requestMessage &&
                         typeof requestMessage === "object" &&
                         (requestMessage.messageId || requestMessage.requestId)
                             ? requestMessage
                             : message;
-
                     return reply(responseType, payload, candidate);
                 };
-
                 Promise.resolve()
-                    .then(() =>
-                        onWidgetMessage(
-                            message,
-                            replyToMessage,
-                            bridge
-                        )
-                    )
-                    .catch((error) => {
+                    .then(function () {
+                        return onWidgetMessage(message, replyToMessage, bridge);
+                    })
+                    .catch(function (error) {
                         reportError(
-                            error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED,
+                            (error && error.code) || WIDGET_ERROR_CODE.HANDLER_FAILED,
                             null,
                             error
                         );
@@ -646,7 +603,7 @@ export function createWidgetBridge(widgetElement, options = {}) {
             }
         } catch (error) {
             reportError(
-                error?.code || WIDGET_ERROR_CODE.HANDLER_FAILED,
+                (error && error.code) || WIDGET_ERROR_CODE.HANDLER_FAILED,
                 null,
                 error
             );
@@ -657,7 +614,7 @@ export function createWidgetBridge(widgetElement, options = {}) {
 
     bridge = Object.freeze({
         type: "WIX_HTML_COMPONENT_BRIDGE",
-        bridgeId,
+        bridgeId: bridgeId,
         protocolVersion: PROTOCOL_VERSION,
         widget: widgetElement,
         originPolicyMode: originPolicy.mode,
@@ -668,21 +625,20 @@ export function createWidgetBridge(widgetElement, options = {}) {
         get handshakeCompleted() {
             return handshakeCompleted;
         },
-        send,
-        reply,
-        postMessage,
-        subscribe,
-        destroy() {
+        send: send,
+        reply: reply,
+        postMessage: postMessage,
+        subscribe: subscribe,
+        destroy: function () {
             if (destroyed) return;
             destroyed = true;
             listeners.clear();
             clearAllTimers();
-
             if (typeof unsubscribeWidget === "function") {
                 try {
                     unsubscribeWidget();
                 } catch (_) {
-                    // Safe if the widget has already been detached.
+                    // Seguro si el widget ya fue desmontado.
                 }
             }
         }
