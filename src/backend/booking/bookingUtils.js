@@ -1,593 +1,362 @@
 /*
-=============================================================================
 MODULE: backend/booking/bookingUtils.js
-VERSION: v5010.1-BOOKINGS-ALIGN
-BASE: v5009-FISCAL-V20.1 + Wix Bookings API alignment pass
-STANDARDS: G10 ASCII Strict
+VERSION: v5008.5-PAIRTOKEN-CANONICAL
+RESPONSIBILITY: Capa de utilidades PURAS del dominio de reservas. Sin acceso a
+                CMS, sin SDK de Wix, sin efectos. Precedencia declarada:
+                mmUtils > bookingUtils > bookingCore > *.web.js
+STANDARDS: G10 ASCII estricto. Sin imports de backend salvo internalConfig
+           (constantes) y public/mmUtils (primitivas).
+REGLA ANTI-DUPLICACION (BIBLIA 0.5.1):
+  Las primitivas genericas (fechas, gap, duraciones, GUID) NO se reimplementan
+  aqui: se reexportan desde public/mmUtils, que es su unico hogar canonico.
+  Este modulo solo define lo que es DOMINIO de reservas.
 
-RESPONSIBILITY: Helpers compartidos entre reservas, citas, bookingSaga y
-                bookingCore. Utilidades puras. Sin acceso a colecciones CMS.
-
-CONTRATOS WIX BOOKINGS REFERENCIADOS:
-  - Time Slots V2 (listAvailabilityTimeSlots / getAvailabilityTimeSlot):
-      Cada slot incluye availableResources con grupos por resourceTypeId.
-      getResourceIdsFromSlot extrae los GUIDs de staff de esos grupos.
-      Documentacion:
-        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
-        time-slots/time-slots-v2/list-availability-time-slots
-        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
-        time-slots/time-slots-v2/get-availability-time-slot
-  - Create Booking (bookings.createBooking):
-      bookedEntity.slot exige serviceId, scheduleId, startDate/endDate en
-      ISO UTC con Z, resource.id y location.locationType = OWNER_BUSINESS.
-      Los add-ons viajan en bookedAddOns a NIVEL RAIZ, no en el slot.
-      Documentacion:
-        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
-        bookings/bookings-writer-v2/create-booking
-  - Cancel Booking (bookings.cancelBooking):
-      revision es OBLIGATORIO para prevenir conflictos de concurrencia.
-      Documentacion:
-        https://dev.wix.com/docs/api-reference/business-solutions/bookings/
-        bookings/bookings-writer-v2/cancel-booking
-  - Duration-range services: para servicios con availabilityConstraints.
-      durationRange, customerChoices NO esta soportado; la duracion se
-      deriva de localStartDate/localEndDate.
-
-FIXES APLICADOS v5010.1-BOOKINGS-ALIGN:
-  - BU-01: computeGapMinutes devuelve null para inputs invalidos, alineado
-          con mmUtils.computeGapMinutes. Antes devolvia 0, lo que ocultaba
-          errores (0 es un gap valido). Los consumidores deben tratar null
-          como error.
-  - BU-02: cleanGuidList usa getReferenceId de mmUtils para cubrir todas
-          las formas de referencia Wix (_id, id, referenceId, value,
-          arrays). Antes solo cubria resourceId, id, _id.
-  - BU-03: Header y JSDoc actualizados con referencias explicitas a la
-          documentacion oficial de Wix Bookings.
-
-FIXES APLICADOS v5009-FISCAL-V20.1 (heredados):
-  - V20-01: sin cambios funcionales.
-
-FIXES APLICADOS v5008.3 (heredados):
-  - FIX-18: cleanGuid, cleanGuidList.
-  - FIX-26: numberOrZero, booleanValue.
-  - FIX-16: toUtcRange.
-  - FIX-17: validateSlotDuration.
-  - FIX-R2: pickStaffByLowestLoad (balanceo de carga staff).
+FIXES v5008.5 (D3):
+  UTILS-01 (P0) _buildPairTokenDeterministic se define AQUI como unica fuente
+         canonica. Antes vivia en bookingCore, lo que obligaba a reservas.web.js
+         (capa web) a importar bookingCore (capa core) solo para emitir el token
+         del par dual. Con la definicion en la capa de utilidades puras:
+           - reservas.web importa desde bookingUtils (web -> utils, permitido)
+           - bookingCore reexporta (core -> utils, permitido)
+           - bookingSaga lo consume via bookingCore (superficie historica intacta)
+         Cero ciclos y cero duplicacion de logica.
+  UTILS-02 (P0) _buildPairFingerprint normaliza internamente los 8 campos del
+         contrato (trim + _normalizeLocalIsoStr) y deriva dateYmd de f1Start.
+         Antes cada llamante normalizaba por su cuenta, de modo que un mismo par
+         podia producir dos huellas distintas segun el punto de emision y romper
+         la correlacion SUPPLIED/FINGERPRINT y la idempotencia dual.
+PENDIENTE (no resuelto aqui, requiere edicion de reservas.web.js):
+  reservas.web._getResourceIdsFromSlot es una copia privada de
+  getResourceIdsFromSlot. Debe delegar en este modulo para cerrar la duplicacion.
+VERIFICAR ANTES DE PUBLICAR (este fichero se entrega reconstruido a partir de sus
+consumidores reales; si el fichero vivo exporta algo mas, conservarlo):
+  grep -n "from \"backend/booking/bookingUtils\"" -r src | sort -u
 =============================================================================
 */
 
 import {
     _safeTrim,
     _looksLikeGuid,
+    _hashKey,
+    _stableSerialize,
     _normalizeLocalIsoStr,
-    getUtcDateFromMadridLocal,
-    getReferenceId,
+    cleanGuidList,
+    cleanGuidListByKey,
+    computeGapMinutes,
+    toUtcRange,
+    isDualGapWithinLimit,
+    readDurationRange,
+    resolveExpectedSlotMinutes,
+    computeTotalDuration,
+    validateSlotDuration
 } from "public/mmUtils";
 
-import { logger } from "backend/logger";
+// ============================================================================
+// REEXPORTS: primitivas genericas (hogar canonico = public/mmUtils)
+// ============================================================================
+// Se reexportan para que el dominio de reservas tenga una unica superficie de
+// import. No se redefine ninguna logica (BIBLIA 0.5.1).
+export {
+    cleanGuidList,
+    cleanGuidListByKey,
+    computeGapMinutes,
+    toUtcRange,
+    isDualGapWithinLimit,
+    readDurationRange,
+    resolveExpectedSlotMinutes,
+    computeTotalDuration,
+    validateSlotDuration
+};
 
-const log = logger;
-
-// =============================================================================
-// BLOQUE 1 - GUID Y COERCION
-// =============================================================================
-
-export function cleanGuid(value, errorCode = "INVALID_GUID") {
-    const clean = _safeTrim(value);
-
-    if (!clean || !_looksLikeGuid(clean)) {
-        throw new Error(`${errorCode}: GUID invalido o ausente`);
-    }
-
-    return clean;
-}
+// ============================================================================
+// HUELLA Y TOKEN DEL PAR DUAL (UTILS-01, UTILS-02)
+// ============================================================================
 
 /**
- * BU-02: lista de GUIDs validos desde multiples formas de referencia Wix.
- * Formas admitidas: Array<GUID> | CSV | Array<objeto referencia>.
- *
- * Delega en getReferenceId de mmUtils, que cubre _id, id, referenceId,
- * value y arrays anidados. Antes solo cubria resourceId, id, _id.
- *
- * AVISO DE IDENTIDAD (mmUtils):
- *   ServiciosCatalogo.availableStaff es MULTI_REFERENCE a Members. Esta
- *   funcion devuelve staffMemberId, NO resourceId. La resolucion
- *   staffMemberId -> resourceId se ejecuta en backend/staff.js
- *   (getStaffDisplayName, getStaffScheduleId). No enviar el resultado
- *   directamente a resourceIds de Wix Bookings V2.
+ * Contrato de huella: 8 campos, orden canonico fijo. Cualquier cambio en el
+ * orden o en el contenido rompe la correlacion entre los tres puntos donde se
+ * genera o consume un pairToken:
+ *   1. reservas.web._getCertifiedDualSlotsInternal  (emisor en disponibilidad)
+ *   2. bookingSaga._resolveUnifiedPairToken         (verificador / reemisor)
+ *   3. CitasF2.pairToken + ControlOperativo._id     (persistencia e idempotencia)
  */
-export function cleanGuidList(value) {
-    const source = Array.isArray(value)
-        ? value
-        : typeof value === "string"
-            ? value.split(",")
-            : [];
-
-    return Array.from(
-        new Set(
-            source
-                .map((item) => getReferenceId(item))
-                .map((id) => _safeTrim(id))
-                .filter((id) => _looksLikeGuid(id))
-        )
-    );
-}
-
-// =============================================================================
-// BLOQUE 1B - HELPERS CANONICOS DE SLOT Y PAIR TOKEN
-//
-// Unicas implementaciones de:
-//   - normalizacion de forma de slot (normalizeSlotShape)
-//   - extraccion de resourceIds de staff (getResourceIdsFromSlot)
-//   - huella canonica del par dual (_buildPairFingerprint)
-//
-// Precedencia de modulo segun regla FASE 2:
-//   mmUtils > bookingUtils > core > web.
-// =============================================================================
+const PAIR_FINGERPRINT_FIELDS = Object.freeze([
+    "serviceId",
+    "linkedPhases",
+    "dateYmd",
+    "f1Start",
+    "f1End",
+    "f2Start",
+    "f2End",
+    "resourceId"
+]);
 
 /**
- * Huella canonica del par dual (CORE-05 / SAGA-02).
- *
- * Debe ser IDENTICA en los tres puntos donde se genera o consume un
- * pairToken:
- *   1. reservas.web._getCertifiedDualSlotsInternal (emisor en disponibilidad)
- *   2. bookingSaga._resolveUnifiedPairToken        (consumidor/reemisor)
- *   3. DualSlotCache.pairToken                     (persistencia)
- *
- * Los 8 campos son obligatorios por contrato (los opcionales se serializan
- * como cadena vacia). Cualquier cambio en el orden o contenido de los campos
- * rompe la correlacion y la idempotencia.
+ * UTILS-02: huella determinista del par dual.
+ * Normaliza internamente para que dos llamantes distintos produzcan la misma
+ * cadena ante el mismo par:
+ *   - GUID y texto: _safeTrim
+ *   - instantes locales: _normalizeLocalIsoStr (acepta Date, ISO con Z, ISO local)
+ *   - dateYmd: se DERIVA de f1Start normalizado. Si el llamante aporta un dateYmd
+ *     valido y coherente se respeta; si falta o discrepa, gana f1Start. Esto
+ *     elimina la unica fuente real de divergencia observada (reservas.web usaba
+ *     el dateYmd de la consulta y bookingSaga el de f1Start).
+ * Los campos opcionales se serializan como cadena vacia, nunca como undefined.
  */
-export function _buildPairFingerprint({
-    serviceId,
-    linkedPhases,
-    dateYmd,
-    f1Start,
-    f1End,
-    f2Start,
-    f2End,
-    resourceId,
-} = {}) {
-    return [
-        _safeTrim(serviceId) || "",
-        _safeTrim(linkedPhases) || "",
-        _safeTrim(dateYmd) || "",
-        _safeTrim(f1Start) || "",
-        _safeTrim(f1End) || "",
-        _safeTrim(f2Start) || "",
-        _safeTrim(f2End) || "",
-        _safeTrim(resourceId) || "",
-    ].join("|");
+export function _buildPairFingerprint(input) {
+    const src = input && typeof input === "object" ? input : {};
+
+    const serviceId = _safeTrim(src.serviceId);
+    const linkedPhases = _safeTrim(src.linkedPhases);
+    const resourceId = _safeTrim(src.resourceId);
+
+    const f1Start = _normalizeLocalIsoStr(src.f1Start) ||
+        _safeTrim(src.f1Start);
+    const f1End = _normalizeLocalIsoStr(src.f1End) ||
+        _safeTrim(src.f1End);
+    const f2Start = _normalizeLocalIsoStr(src.f2Start) ||
+        _safeTrim(src.f2Start);
+    const f2End = _normalizeLocalIsoStr(src.f2End) ||
+        _safeTrim(src.f2End);
+
+    const candidateDateYmd = _safeTrim(src.dateYmd).slice(0, 10);
+    const derivedDateYmd = _safeTrim(f1Start).slice(0, 10);
+    const dateYmd = /^\d{4}-\d{2}-\d{2}$/.test(candidateDateYmd) &&
+        candidateDateYmd === derivedDateYmd
+        ? candidateDateYmd
+        : derivedDateYmd;
+
+    const canonical = {
+        serviceId: serviceId,
+        linkedPhases: linkedPhases,
+        dateYmd: dateYmd,
+        f1Start: f1Start,
+        f1End: f1End,
+        f2Start: f2Start,
+        f2End: f2End,
+        resourceId: resourceId
+    };
+
+    // _stableSerialize ordena claves: el resultado no depende del orden en que
+    // el llamante construyo el objeto.
+    return PAIR_FINGERPRINT_FIELDS
+        .map(function (field) { return field + "=" + String(canonical[field] || ""); })
+        .join("|") + "#" + _stableSerialize(canonical);
 }
 
 /**
- * Normaliza la forma de un slot Time Slots V2: si llega envuelto en
- * { slot: {...} }, fusiona el slot interno con el contenedor (el contenedor
- * manda). Idempotente sobre slots ya planos.
+ * UTILS-01: token canonico del par dual. Unica definicion del sistema.
+ * bookingCore lo reexporta; reservas.web y bookingSaga lo consumen.
+ */
+export function _buildPairTokenDeterministic(input) {
+    return _hashKey(_buildPairFingerprint(input));
+}
+
+// ============================================================================
+// RECURSOS (STAFF) DESDE SLOTS DE DISPONIBILIDAD
+// ============================================================================
+
+/**
+ * Forma canonica del slot: Wix devuelve tanto la forma plana como la anidada
+ * ({ slot: {...}, ...metadata }). Se aplana a una sola figura.
  */
 export function normalizeSlotShape(slot) {
     if (!slot || typeof slot !== "object") return null;
     if (slot.slot && typeof slot.slot === "object") {
-        return { ...slot.slot, ...slot };
+        return Object.assign({}, slot.slot, slot);
     }
     return slot;
 }
 
 /**
- * Extrae los resourceIds GUID del grupo de staff de un slot (formato plano o
- * envuelto), deduplicados. Fallback: resource directo / resourceId plano.
- *
- * Alineado con Time Slots V2 (availableResources):
- *   https://dev.wix.com/docs/api-reference/business-solutions/bookings/
- *   time-slots/time-slots-v2/list-availability-time-slots
- *
- * Cada grupo de availableResources tiene resourceTypeId y resources[].
- * Wix devuelve variantes segun version de API:
+ * Extrae los resourceId de STAFF disponibles en un slot.
+ * Cubre las cuatro variantes de tipo de recurso que devuelve Wix segun version
+ * de API y forma del slot:
  *   group.resourceTypeId | group.resourceType.id | group.resourceType._id |
  *   group.typeId
- * Y cada resource puede venir como:
+ * y las tres variantes de identificador de recurso:
  *   resource.id | resource._id | resource.resourceId
+ * Fallback final: resource directo o resourceId plano en el slot.
  *
- * @param {object} slot slot crudo o normalizado
- * @param {string} staffResourceTypeId id del tipo de recurso STAFF (API.*)
+ * AVISO (INFORME BOOKINGS 15, error 5): el resultado son resourceId de Bookings.
+ * Nunca mezclar con memberId de Members: ServiciosCatalogo.availableStaff era un
+ * MULTI_REFERENCE a Members y exigia resolucion previa en backend/staff.js.
  */
 export function getResourceIdsFromSlot(slot, staffResourceTypeId) {
-    const normalizedSlot = normalizeSlotShape(slot);
-    if (!normalizedSlot || typeof normalizedSlot !== "object") return [];
+    const normalized = normalizeSlotShape(slot);
+    if (!normalized) return [];
 
+    const wantedTypeId = _safeTrim(staffResourceTypeId);
     let groups = [];
-    if (Array.isArray(normalizedSlot.availableResources)) {
-        groups = normalizedSlot.availableResources;
-    } else if (
-        normalizedSlot.slot &&
-        typeof normalizedSlot.slot === "object" &&
-        Array.isArray(normalizedSlot.slot.availableResources)
-    ) {
-        groups = normalizedSlot.slot.availableResources;
+    if (Array.isArray(normalized.availableResources)) {
+        groups = normalized.availableResources;
     }
 
     if (groups.length > 0) {
-        const staffGroup = groups.find((group) => {
-            const typeId =
-                group?.resourceTypeId ||
-                group?.resourceType?.id ||
-                group?.resourceType?._id ||
-                group?.typeId;
-
-            return String(typeId) === String(staffResourceTypeId);
-        });
-
-        if (staffGroup) {
-            return Array.from(
-                new Set(
-                    (staffGroup.resources || [])
-                        .map((resource) =>
-                            _safeTrim(
-                                resource?.id || resource?._id || resource?.resourceId
-                            )
-                        )
-                        .filter((resourceId) => _looksLikeGuid(resourceId))
-                )
+        const staffGroup = groups.find(function (group) {
+            if (!group || typeof group !== "object") return false;
+            const resourceType = group.resourceType && typeof group.resourceType === "object"
+                ? group.resourceType
+                : {};
+            const groupTypeId = _safeTrim(
+                group.resourceTypeId ||
+                resourceType.id ||
+                resourceType._id ||
+                group.typeId
             );
-        }
+            return wantedTypeId ? groupTypeId === wantedTypeId : Boolean(groupTypeId);
+        });
+        if (!staffGroup) return [];
+        const collected = (Array.isArray(staffGroup.resources) ? staffGroup.resources : [])
+            .map(function (resource) {
+                if (!resource) return "";
+                if (typeof resource === "string") return _safeTrim(resource);
+                return _safeTrim(resource.id || resource._id || resource.resourceId);
+            })
+            .filter(_looksLikeGuid);
+        return Array.from(new Set(collected));
     }
 
+    const resource = normalized.resource && typeof normalized.resource === "object"
+        ? normalized.resource
+        : {};
     const directId = _safeTrim(
-        normalizedSlot.resource?.id ||
-        normalizedSlot.resource?._id ||
-        normalizedSlot.resource?.resourceId ||
-        normalizedSlot.resourceId
+        resource.id || resource._id || resource.resourceId || normalized.resourceId
     );
     return _looksLikeGuid(directId) ? [directId] : [];
 }
 
-export function numberOrZero(value) {
-    const number = Number(value);
+/**
+ * Seleccion determinista del profesional con menor carga del dia.
+ * Criterio de desempate: el indice mas bajo en la lista de entrada, que proviene
+ * del orden de Wix. Nunca devuelve un id fuera de candidateIds.
+ * Devuelve null si no hay candidatos: el llamante decide el fallback.
+ */
+export function pickStaffByLowestLoad(candidateIds, loadByResourceId) {
+    const candidates = cleanGuidList(candidateIds);
+    if (candidates.length === 0) return null;
+    const loads = loadByResourceId && typeof loadByResourceId === "object"
+        ? loadByResourceId
+        : {};
 
-    return Number.isFinite(number) && number >= 0
-        ? number
-        : 0;
+    let picked = null;
+    let pickedLoad = Infinity;
+    for (let index = 0; index < candidates.length; index += 1) {
+        const id = candidates[index];
+        const load = Number(loads[id]);
+        const safeLoad = Number.isFinite(load) && load >= 0 ? load : 0;
+        if (safeLoad < pickedLoad) {
+            pickedLoad = safeLoad;
+            picked = id;
+        }
+    }
+    return picked || candidates[0];
 }
 
-export function booleanValue(...values) {
-    return values.some((value) => value === true);
-}
-
-// =============================================================================
-// BLOQUE 2 - GAP Y UTC RANGES
-// =============================================================================
+// ============================================================================
+// CATALOGO: DURACION DE LA FASE VINCULADA (F2)
+// ============================================================================
 
 /**
- * BU-01: gap entre fases en minutos.
+ * Resuelve la duracion real del servicio F2 (linkedPhases) cuando el servicio
+ * padre no declara phase2Duration o la declara a 0.
  *
- * Devuelve null cuando los instantes no son validos. Un gap ilegible nunca
- * debe degradarse a 0, porque 0 es un gap valido y ocultaria el error.
+ * Contrato de inyeccion: getServiceFn(slugOrId) -> { status, data, error }.
+ * Se inyecta para no importar reservas.web.js desde la capa de utilidades
+ * (evita el ciclo utils -> web -> utils).
  *
- * Alineado con mmUtils.computeGapMinutes.
- *
- * @param {Date} f1EndUtc   fin de fase 1 en UTC
- * @param {Date} f2StartUtc inicio de fase 2 en UTC
- * @returns {number|null}   gap en minutos >= 0, o null si invalido
+ * `visited` es el conjunto de serviceId ya recorridos: protege contra
+ * autorreferencia y contra ciclos A -> B -> A. Ante cualquier ciclo o fallo se
+ * devuelve 0 y el llamante aplica su propio fallback; nunca se inventa una
+ * duracion (BIBLIA 0.5.4: no se fabrican datos).
  */
-export function computeGapMinutes(f1EndUtc, f2StartUtc) {
-    if (!(f1EndUtc instanceof Date) || !(f2StartUtc instanceof Date)) {
-        return null;
-    }
+export async function resolveLinkedPhase2Duration(linkedPhases, traceId, visited, getServiceFn) {
+    const linkedId = _safeTrim(linkedPhases);
+    if (!_looksLikeGuid(linkedId)) return 0;
+    if (typeof getServiceFn !== "function") return 0;
 
-    if (Number.isNaN(f1EndUtc.getTime()) || Number.isNaN(f2StartUtc.getTime())) {
-        return null;
-    }
+    const seen = visited instanceof Set ? visited : new Set();
+    if (seen.has(linkedId)) return 0;
+    seen.add(linkedId);
 
-    const milliseconds =
-        f2StartUtc.getTime() - f1EndUtc.getTime();
+    try {
+        const result = await getServiceFn(linkedId);
+        if (!result || result.status !== "SUCCESS" || !result.data) return 0;
+        const linked = result.data;
 
-    return Math.max(0, Math.round(milliseconds / 60000));
-}
+        const declared = Number(linked.phase2Duration);
+        if (Number.isFinite(declared) && declared > 0) return declared;
 
-export function toUtcRange(startLocal, endLocal) {
-    const startUtc = getUtcDateFromMadridLocal(
-        _normalizeLocalIsoStr(startLocal)
-    );
+        const total = Number(linked.totalDuration);
+        if (Number.isFinite(total) && total > 0) return total;
 
-    const endUtc = getUtcDateFromMadridLocal(
-        _normalizeLocalIsoStr(endLocal)
-    );
+        const phase1 = Number(linked.phase1Duration);
+        if (Number.isFinite(phase1) && phase1 > 0) return phase1;
 
-    if (!startUtc || !endUtc) {
-        return null;
-    }
-
-    if (endUtc.getTime() <= startUtc.getTime()) {
-        return null;
-    }
-
-    return { startUtc, endUtc };
-}
-
-// =============================================================================
-// BLOQUE 3 - DURATION RANGE
-// =============================================================================
-
-/**
- * Lee el durationRange del servicio.
- *
- * Alineado con la documentacion de Wix Bookings:
- *   "For services configured with a duration range
- *    (availabilityConstraints.durationRange), customerChoices is not
- *    supported. The duration is derived from the localStartDate and
- *    localEndDate specified in the request."
- *
- * Fuentes aceptadas (por orden): availabilityConstraints.durationRange,
- * item.durationRange, item.data.durationRange, item.fields.durationRange.
- *
- * @returns {{min: number, max: number}|null} null si no hay rango valido.
- */
-export function readDurationRange(item) {
-    const constraints =
-        item?.availabilityConstraints ||
-        item?.data?.availabilityConstraints ||
-        item?.fields?.availabilityConstraints;
-
-    const range =
-        constraints?.durationRange ||
-        item?.durationRange ||
-        item?.data?.durationRange ||
-        item?.fields?.durationRange;
-
-    if (!range || typeof range !== "object") {
-        return null;
-    }
-
-    const min = Number(
-        range.minDuration ??
-        range.min ??
-        0
-    ) || 0;
-
-    const rawMax = Number(
-        range.maxDuration ??
-        range.max ??
-        0
-    ) || 0;
-
-    const max = rawMax > 0 ? rawMax : Infinity;
-
-    if (min <= 0 && max === Infinity) {
-        return null;
-    }
-
-    if (max !== Infinity && max <= min) {
-        return null;
-    }
-
-    return { min, max };
-}
-
-// =============================================================================
-// BLOQUE 4 - DURACION EFECTIVA
-// =============================================================================
-
-/**
- * Duracion esperada del slot reservable.
- *
- * Para servicios duales (allowCombine), el slot reservable corresponde a la
- * fase 1. Para servicios simples, se usa phase1Duration o totalDuration.
- *
- * @param {object} serviceConfig DTO de _mapServiceImport2ToUX.
- * @returns {number} minutos esperados (0 si no hay config).
- */
-export function resolveExpectedSlotMinutes(serviceConfig) {
-    if (!serviceConfig) {
+        return 0;
+    } catch (_) {
+        // Fallo de catalogo no debe abortar la disponibilidad: 0 y fallback
+        // en el llamante. Se traza en el nivel que tiene contexto de negocio.
         return 0;
     }
-
-    if (serviceConfig.allowCombine === true) {
-        return Number(
-            serviceConfig.phase1Duration || 0
-        ) || 0;
-    }
-
-    return (
-        Number(serviceConfig.phase1Duration || 0) ||
-        Number(serviceConfig.totalDuration || 0) ||
-        Number(
-            serviceConfig.metadata?.timing?.estimatedTotal || 0
-        ) ||
-        0
-    );
 }
 
-/**
- * Resuelve la duracion de la fase 2 de un servicio dual, siguiendo la
- * cadena de linkedPhases con deteccion de ciclos.
- *
- * @param {string} linkedServiceId GUID del servicio enlazado.
- * @param {string} traceId         Trazabilidad.
- * @param {Set}    visited         Set de IDs visitados (deteccion de ciclos).
- * @param {function} resolver      Funcion async que devuelve {status, data}.
- * @returns {Promise<number>}      Minutos de fase 2, o 0 si invalido/ciclo.
- */
-export async function resolveLinkedPhase2Duration(
-    linkedServiceId,
-    traceId,
-    visited = new Set(),
-    resolver
-) {
-    const linkedId = _safeTrim(linkedServiceId);
-
-    if (
-        !_looksLikeGuid(linkedId) ||
-        typeof resolver !== "function"
-    ) {
-        return 0;
-    }
-
-    if (visited.has(linkedId)) {
-        log.warn(
-            "Cycle detected in linkedPhases chain",
-            { traceId, linkedId, visited: Array.from(visited) }
-        );
-        return 0;
-    }
-
-    visited.add(linkedId);
-
-    const result = await resolver(
-        linkedId,
-        traceId
-    );
-
-    if (
-        result?.status !== "SUCCESS" ||
-        !result?.data
-    ) {
-        return 0;
-    }
-
-    const service = result.data;
-
-    return (
-        Number(service.phase1Duration || 0) ||
-        Number(service.totalDuration || 0) ||
-        Number(service.metadata?.timing?.estimatedTotal || 0) ||
-        0
-    );
-}
-
-// =============================================================================
-// BLOQUE 5 - VALIDACION DE DURACION DE SLOT
-// =============================================================================
+// ============================================================================
+// ADD-ONS (ComplementosCatalogo -> Bookings nativeId)
+// ============================================================================
 
 /**
- * Valida que la duracion real de un slot coincida con la configuracion del
- * servicio (rango o duracion exacta).
- *
- * @param {object} params
- * @param {object} params.serviceConfig DTO del servicio.
- * @param {string} params.startLocal    inicio local (ISO sin Z).
- * @param {string} params.endLocal      fin local (ISO sin Z).
- * @returns {{ok: boolean, code: string|null, actualMinutes: number,
- *            expectedMinutes: number|null, min: number|null,
- *            max: number|null}}
+ * Proyecta un add-on del catalogo al contrato minimo que consume el Writer V2.
+ * Devuelve null si falta identidad o precio: un add-on ilegible no se inyecta
+ * (fail-closed, nunca se cobra sin el extra seleccionado).
  */
-export function validateSlotDuration({
-    serviceConfig,
-    startLocal,
-    endLocal,
-}) {
-    const result = {
-        ok: true,
-        code: null,
-        actualMinutes: 0,
-        expectedMinutes: null,
-        min: null,
-        max: null,
+export function normalizeCatalogAddOn(addOn) {
+    if (!addOn || typeof addOn !== "object") return null;
+    const addOnId = _safeTrim(addOn.addOnId || addOn.addonId || addOn.id);
+    const name = _safeTrim(addOn.name || addOn.title);
+    const price = Number(addOn.price);
+    if (!addOnId || !name || !Number.isFinite(price) || price < 0) return null;
+    const nativeId = _safeTrim(addOn.nativeId);
+    return {
+        addOnId: addOnId,
+        name: name,
+        price: price,
+        nativeId: _looksLikeGuid(nativeId) ? nativeId : null
     };
-
-    if (!serviceConfig || typeof serviceConfig !== "object") {
-        return result;
-    }
-
-    const startUtc = getUtcDateFromMadridLocal(
-        _normalizeLocalIsoStr(startLocal)
-    );
-
-    const endUtc = getUtcDateFromMadridLocal(
-        _normalizeLocalIsoStr(endLocal)
-    );
-
-    if (!startUtc || !endUtc) {
-        return result;
-    }
-
-    const diffMs = endUtc.getTime() - startUtc.getTime();
-
-    if (!Number.isFinite(diffMs) || diffMs <= 0) {
-        return result;
-    }
-
-    const actualMinutes = Math.round(diffMs / 60000);
-
-    result.actualMinutes = actualMinutes;
-
-    const durationRange = serviceConfig.durationRange;
-
-    if (durationRange) {
-        const { min, max } = durationRange;
-
-        result.min = min;
-        result.max = max === Infinity ? null : max;
-
-        const belowMin = min > 0 && actualMinutes < min;
-        const aboveMax = max !== Infinity && actualMinutes > max;
-
-        if (belowMin || aboveMax) {
-            result.ok = false;
-            result.code = "SLOT_DURATION_OUT_OF_RANGE";
-        }
-
-        return result;
-    }
-
-    const expectedMinutes =
-        resolveExpectedSlotMinutes(serviceConfig);
-
-    if (expectedMinutes > 0) {
-        result.expectedMinutes = expectedMinutes;
-
-        if (Math.abs(actualMinutes - expectedMinutes) > 1) {
-            result.ok = false;
-            result.code = "SLOT_DURATION_MISMATCH";
-        }
-    }
-
-    return result;
 }
 
-// =============================================================================
-// BLOQUE 6 - BALANCEO DE CARGA DE STAFF (FIX-R2)
-//
-// Elige el recurso con menor carga del mapa loadByResource. En empates,
-// orden alfabetico determinista. Si el mapa esta vacio, primer alfabetico.
-//
-// Uso: reservas.web.js (dual), revalidateExactAvailabilitySlot cuando no
-// hay requiredResourceId y hay multiples candidatos.
-// =============================================================================
+/**
+ * Resuelve los nativeId de Bookings para los addOnIds solicitados.
+ * Solo devuelve los que existen en el catalogo del servicio: el resto se traza
+ * como rechazado. El limite es BOOKINGS_ADDON_CONFIG.MAX_POR_RESERVA (5).
+ */
+export function resolveNativeAddOnIds(catalogAddOns, requestedIds, maxPerBooking) {
+    const catalog = Array.isArray(catalogAddOns) ? catalogAddOns : [];
+    const requested = Array.isArray(requestedIds) ? requestedIds : [];
+    const limit = Number(maxPerBooking) > 0 ? Number(maxPerBooking) : 5;
 
-export function pickStaffByLowestLoad(candidates, loadByResource) {
-    const ids = Array.isArray(candidates)
-        ? Array.from(
-            new Set(
-                candidates
-                    .map((id) => _safeTrim(id))
-                    .filter((id) => _looksLikeGuid(id))
-            )
-        )
-        : [];
-
-    if (ids.length === 0) {
-        return null;
+    const byAddOnId = new Map();
+    for (const entry of catalog) {
+        const normalized = normalizeCatalogAddOn(entry);
+        if (!normalized) continue;
+        byAddOnId.set(normalized.addOnId, normalized);
+        if (normalized.nativeId) byAddOnId.set(normalized.nativeId, normalized);
     }
 
-    const loadMap =
-        loadByResource && typeof loadByResource === "object"
-            ? loadByResource
-            : {};
-
-    const sorted = ids.slice().sort((a, b) => a.localeCompare(b));
-
-    let best = sorted[0];
-    let bestLoad = Number(loadMap[best] || 0);
-
-    for (let i = 1; i < sorted.length; i += 1) {
-        const id = sorted[i];
-        const load = Number(loadMap[id] || 0);
-
-        if (load < bestLoad) {
-            best = id;
-            bestLoad = load;
+    const resolved = [];
+    const rejected = [];
+    for (const rawId of requested) {
+        const id = _safeTrim(rawId);
+        if (!id) continue;
+        const match = byAddOnId.get(id);
+        if (match && match.nativeId && resolved.indexOf(match.nativeId) < 0) {
+            resolved.push(match.nativeId);
+        } else if (!match || !match.nativeId) {
+            rejected.push(id);
         }
     }
-
-    return best;
+    return {
+        nativeAddonIds: resolved.slice(0, limit),
+        rejectedAddonIds: rejected
+    };
 }
