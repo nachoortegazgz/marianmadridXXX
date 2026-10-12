@@ -1,16 +1,21 @@
 /*
 FILE: pages/servicio-2.js
-VERSION: v5013.3-UNICODE-SLUG-FIX
-BASE: v5013.2-SERVICE-LOOKUP-FIX
+VERSION: v5013.4-SLUG-OPTIONAL-FIX
+BASE: v5013.3-UNICODE-SLUG-FIX
 PURPOSE: Load the selected CMS service and provide the widget context.
-FIXES:
-  - getServiceSlug uses _safeTrim only (no _safeSlugOrId). Preserves ñ,
-    tildes and all Unicode characters in slugs.
-  - buildBookingUrl passes raw slug to URLSearchParams which encodes it
-    correctly for transport; backend decodes without loss.
-  - Widget ID: #htmlWidgetCustomService (confirmed in Editor).
+FIXES v5013.4:
+  - slug is now OPTIONAL. Services can be loaded by servicioID alone.
+    The previous validation `if (!slug) throw` caused SERVICE_NOT_FOUND
+    for services with empty slug in ServiciosCatalogo.
+  - resolveServiceLookup prioritizes query.serviceId (GUID) over
+    query.slug, then falls back to last path segment. No _safeSlugOrId
+    normalization on serviceId to preserve GUID integrity.
+  - Unicode preservation intact: ñ and tildes pass through unchanged.
+    URLSearchParams encodes slugs correctly for transport.
+FIXES HEREDADOS:
+  - Widget ID: #htmlWidgetCustomService.
   - Import PROTOCOL_URLS from widgetBridge (SSOT).
-  - Full syntax recovery: =>, &&, ||, ?? operators restored.
+  - Full syntax recovery.
   - Recommendations field aligned with new CMS structure.
   - Timeout aligned to 30s (PROTOCOL_UI.CONTEXT_TIMEOUT_MS).
 ASCII: Strict ASCII in comments and identifiers.
@@ -49,6 +54,7 @@ function getReferenceId(value) {
     if (!value || typeof value !== "object") return "";
     return text(
         value.serviceId ||
+        value.servicioID ||
         value.addOnId ||
         value.nativeId ||
         value._id ||
@@ -70,17 +76,16 @@ function getPayload(message) {
     return payload;
 }
 
-function getServiceId(service) {
-    return getReferenceId(service && service.serviceId);
+function getServiceId(data) {
+    return getReferenceId(data && (data.serviceId || data.servicioID));
 }
 
 /**
- * UNICODE-SLUG-FIX: Returns the slug as-is after trim only.
- * Does NOT call _safeSlugOrId (which would lowercase and strip diacritics).
- * URLSearchParams in buildBookingUrl handles encoding for transport.
+ * Returns slug as-is after trim only. No normalization that would strip
+ * ñ or tildes. Slug is OPTIONAL — services can be loaded by servicioID.
  */
-function getServiceSlug(service) {
-    return _safeTrim((service && service.slug) || "");
+function getServiceSlug(data) {
+    return _safeTrim((data && data.slug) || "");
 }
 
 function getLinkedPhaseId(value) {
@@ -102,14 +107,17 @@ function normalizeService(data) {
     const metadata = data.metadata && typeof data.metadata === "object"
         ? data.metadata
         : {};
+
     const serviceId = getServiceId(data);
     const slug = getServiceSlug(data);
+
+    // FIX v5013.4: Only serviceId is required. Slug is optional.
+    // Services with empty slug in ServiciosCatalogo must still load
+    // via servicioID without throwing SERVICE_NOT_FOUND.
     if (!_looksLikeGuid(serviceId)) {
         throw new Error("El servicio no tiene un identificador válido.");
     }
-    if (!slug) {
-        throw new Error("El servicio no tiene un slug válido.");
-    }
+
     const title = text(
         data.title || metadata.titulo || metadata.tituloServicio,
         "Servicio"
@@ -119,16 +127,22 @@ function normalizeService(data) {
     const location = text(
         data.location || data.localizacion || metadata.localizacion
     );
-    const price = toFiniteNumber(data.price !== undefined ? data.price : metadata.precio);
+    const price = toFiniteNumber(
+        data.price !== undefined ? data.price : metadata.precio
+    );
     const totalDuration = toFiniteNumber(
-        data.totalDuration !== undefined ? data.totalDuration
-            : (data.duracionTotal !== undefined ? data.duracionTotal : metadata.duracionTotal)
+        data.totalDuration !== undefined
+            ? data.totalDuration
+            : (data.duracionTotal !== undefined
+                ? data.duracionTotal
+                : metadata.duracionTotal)
     );
     const recommendations = Array.isArray(data.recommendations)
         ? data.recommendations
         : Array.isArray(metadata.recomendaciones)
             ? metadata.recomendaciones
             : [];
+
     return {
         serviceId: serviceId,
         slug: slug,
@@ -152,38 +166,56 @@ function normalizeService(data) {
         clientHidden: data.clientHidden === true,
         allowCombine: data.allowCombine === true,
         phase1Duration: toFiniteNumber(
-            data.phase1Duration !== undefined ? data.phase1Duration : data.tiempoFase1
+            data.phase1Duration !== undefined
+                ? data.phase1Duration
+                : data.tiempoFase1
         ),
         exposureDuration: toFiniteNumber(
-            data.exposureDuration !== undefined ? data.exposureDuration : data.tiempoExposicion
+            data.exposureDuration !== undefined
+                ? data.exposureDuration
+                : data.tiempoExposicion
         ),
         phase2Duration: toFiniteNumber(
-            data.phase2Duration !== undefined ? data.phase2Duration : data.tiempoFase2
+            data.phase2Duration !== undefined
+                ? data.phase2Duration
+                : data.tiempoFase2
         ),
         recommendations: recommendations
     };
 }
 
 /**
- * Resolves service identifier from URL.
- * Priority: query.serviceId (GUID) > query.slug > last path segment.
- * Slugs are preserved with full Unicode (ñ, tildes intact).
+ * FIX v5013.4: Priority order corrected.
+ * 1. query.serviceId (GUID) — NO normalization, preserves GUID integrity
+ * 2. query.slug — preserved with Unicode (ñ, tildes intact)
+ * 3. Last path segment fallback — only if not a generic page name
+ *
+ * Previously used _safeSlugOrId on all candidates which could corrupt
+ * GUIDs and was unnecessary for slug (Unicode must be preserved).
  */
 function resolveServiceLookup() {
     const query = wixLocation.query || {};
+
+    // 1. Explicit GUID in query — highest priority, no transformation
     const queryServiceId = _safeTrim(query.serviceId || "");
-    if (queryServiceId && _looksLikeGuid(queryServiceId)) {
+    if (queryServiceId) {
         return queryServiceId;
     }
+
+    // 2. Slug in query — preserved with Unicode intact
     const querySlug = _safeTrim(query.slug || "");
     if (querySlug) {
         return querySlug;
     }
+
+    // 3. Fallback: last path segment (only if not a generic page name)
     const path = Array.isArray(wixLocation.path) ? wixLocation.path : [];
     const lastSegment = _safeTrim(path[path.length - 1] || "");
+
     if (!lastSegment || EXCLUDED_PATHS.has(lastSegment.toLowerCase())) {
         return null;
     }
+
     return lastSegment;
 }
 
@@ -195,9 +227,9 @@ function getAddOnIds(payload) {
 }
 
 /**
- * UNICODE-SLUG-FIX: Passes raw slug directly to URLSearchParams.
- * URLSearchParams encodes ñ/tildes correctly for transport.
- * Backend receives decoded value and searches by exact match.
+ * Builds booking URL. Slug may be empty string — URLSearchParams handles
+ * it correctly. serviceId is always present (validated in normalizeService).
+ * Unicode slugs are encoded by URLSearchParams for safe transport.
  */
 function buildBookingUrl(service, payload) {
     const base = text(
@@ -258,7 +290,7 @@ async function loadService(lookupValue, traceId) {
     console.info("[servicio-2] Servicio cargado", {
         traceId: traceId,
         serviceId: service.serviceId,
-        slug: service.slug
+        slug: service.slug || "(empty)"
     });
     return service;
 }
