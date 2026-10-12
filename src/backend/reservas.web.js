@@ -1,26 +1,22 @@
 /*
 ============================================================================
 FILE: backend/reservas.web.js
-VERSION: v5010.2-SYNTAX-RECOVERY
-BASE: v5010.1-DAL-MIGRATION + DIAGNOSTICS + FULL SYNTAX RECOVERY
+VERSION: v5010.3-UNICODE-SLUG-FIX
+BASE: v5010.2-SYNTAX-RECOVERY + UNICODE SLUG SUPPORT
 RESPONSIBILITY: Availability engine, dual slots, staff pairing and caching.
-STANDARDS: G10 ASCII Strict.
-FIXES APLICADOS v5010.2-SYNTAX-RECOVERY:
-  - Restauracion completa de sintaxis corrupta por copy-paste.
-  - Operadores restaurados: <=, >=, &&, ||, ===, !==, =>, ??
-  - Identificadores restaurados con guiones bajos y prefijos correctos:
-    BUSINESS_COLLECTIONS, SDK_CONFIG, STAFF_DEFAULT_NAME,
-    STAFF_RESOURCE_TYPE_ID, _safeTrim, _looksLikeGuid, etc.
-  - Template literals restaurados: `${ymd}T00:00:00`
-  - Comentarios multilinea restaurados: 
-  - Arrow functions restauradas: () => en lugar de () = >
-  - Catch vacios restaurados con parametro: catch (_) {}
-  - Todas las referencias validadas contra imports declarados
-FIXES HEREDADOS v5010.1:
-  FIX-DTO-STAFF-01: staffOptions incluye resourceId explicito.
-  FIX-DIAG-DAYS-01/02: Logs de diagnostico temporal en getAvailableDays.
+STANDARDS: G10 ASCII Strict in code. Unicode preserved in data values (slugs).
+FIXES APLICADOS v5010.3:
+UNICODE-SLUG: _safeSlugOrId preserves ñ and accents. Only strips slashes
+       and collapses spaces. Backend searches by exact slug match.
+SYNTAX-FULL: All corrupted operators restored (&&, =>, ??, <=, >=).
+       All identifiers validated against imports.
+       All template literals restored.
+       All catch blocks have parameters.
+FIXES HEREDADOS v5010.2:
+FIX-DTO-STAFF-01: staffOptions includes explicit resourceId.
+FIX-DIAG-DAYS-01/02: Diagnostic logs in getAvailableDays.
 FIXES HEREDADOS v5010-DAL-MIGRATION:
-  DAL-01..DAL-04: Migracion a dataAccess nominal (queryFirstItem/queryItems).
+DAL-01..DAL-04: Migration to nominal dataAccess (queryFirstItem/queryItems).
 ============================================================================
 */
 import { webMethod, Permissions } from "wix-web-module";
@@ -59,7 +55,7 @@ import {
     pickStaffByLowestLoad
 } from "backend/booking/bookingUtils";
 import { logger } from "backend/logger";
-import { getStaffDisplayName, listStaff } from "backend/staff";
+import { getStaffDisplayName } from "backend/staff";
 import { normalizeBookingStatus } from "backend/validation";
 
 const log = logger;
@@ -89,7 +85,7 @@ function _normalizeCatalogService(item) {
         tagLine: item.tagLine || item.lineaDescripcion,
         description: item.description || item.descripcionLarga,
         taxIncluded: item.taxIncluded ?? item.impuestoIncluido,
-        taxRate: item.taxRate ?? item.tipoImpositivo,
+        tipoImpositivo: item.tipoImpositivo ?? item.taxRate,
         phase1Duration: item.phase1Duration ?? item.fase1Duracion,
         exposureDuration: item.exposureDuration ?? item.exposicionDuracion,
         phase2Duration: item.phase2Duration ?? item.fase2Duracion,
@@ -101,7 +97,8 @@ function _normalizeCatalogService(item) {
         internalNotes: item.internalNotes || item.notasInternas,
         currency: item.currency || item.moneda,
         addOnOptions: item.addOnOptions || item.addonOptions || item.complementos,
-        mainMedia: item.mainMedia || item.Imagen || item.imagen
+        mainMedia: item.mainMedia || item.Imagen || item.imagen,
+        recommendations: item.recommendations || item.recomendaciones || []
     };
 }
 
@@ -112,9 +109,9 @@ function _normalizeAddon(addOn) {
     const price = Number(addOn.price);
     if (!addOnId || !name || !Number.isFinite(price)) return null;
     return {
-        addOnId,
-        name,
-        price,
+        addOnId: addOnId,
+        name: name,
+        price: price,
         nativeId: _safeTrim(addOn.nativeId) || null
     };
 }
@@ -122,25 +119,26 @@ function _normalizeAddon(addOn) {
 const SERVICIOS_COL = BUSINESS_COLLECTIONS.SERVICIOS_CATALOGO;
 const WATCHDOG_TIMEOUT_MS = SDK_CONFIG.TIMEOUTS.WATCHDOG_MS;
 const SERVICE_CACHE_TTL_MS = SDK_CONFIG.CACHE.SERVICES_TTL_MS;
-const DIAS_LIMITE = SLOT_SEARCH.DIAS_LIMITE;
 const MINUTOS_MAX_HUECO_DUAL = Math.max(
     0,
-    Number(SLOT_SEARCH?.MINUTOS_MAX_HUECO_DUAL) || 120
+    Number(SLOT_SEARCH && SLOT_SEARCH.MINUTOS_MAX_HUECO_DUAL) || 120
 );
 const CACHE_MAX_SIZE = SDK_CONFIG.CACHE.MAX_ENTRIES;
 const STAFF_RESOURCE_TYPE_ID = API.STAFF_RESOURCE_TYPE_ID;
 const STAFF_LOAD_QUERY_LIMIT = Math.max(
     100,
-    Number(SDK_CONFIG?.JOBS?.HEALTH_CHECK_QUERY_LIMIT) || 1000
+    Number(SDK_CONFIG && SDK_CONFIG.JOBS && SDK_CONFIG.JOBS.HEALTH_CHECK_QUERY_LIMIT) || 1000
 );
 const CONFIGURED_LOCATION_TYPE = _safeTrim(
-    SDK_CONFIG.LOCATION_TYPES?.TIME_SLOTS
+    SDK_CONFIG.LOCATION_TYPES && SDK_CONFIG.LOCATION_TYPES.TIME_SLOTS
 );
+
+// LOCATION_TS is frozen for READ operations (listAvailabilityTimeSlots).
+// For WRITE operations (createBooking), use _buildLocationTS() from bookingCore.
 const LOCATION_TS = Object.freeze({
     id: SDK_CONFIG.LOCATION_ID,
     locationType:
-        !CONFIGURED_LOCATION_TYPE ||
-        CONFIGURED_LOCATION_TYPE === "BUSINESS"
+        !CONFIGURED_LOCATION_TYPE || CONFIGURED_LOCATION_TYPE === "BUSINESS"
             ? "OWNER_BUSINESS"
             : CONFIGURED_LOCATION_TYPE
 });
@@ -155,17 +153,17 @@ function _cacheSetBounded(map, key, value, maxSize) {
     if (firstKey !== undefined) map.delete(firstKey);
 }
 
-function _toPublicError(err, fallbackCode = "INTERNAL_ERROR", fallbackMessage = "Internal Error") {
+function _toPublicError(err, fallbackCode, fallbackMessage) {
     return {
-        code: String(err?.code || fallbackCode),
-        message: String(err?.message || fallbackMessage)
+        code: String((err && err.code) || fallbackCode || "INTERNAL_ERROR"),
+        message: String((err && err.message) || fallbackMessage || "Internal Error")
     };
 }
 
 function _normalizeSlotShape(slot) {
     if (!slot || typeof slot !== "object") return null;
     if (slot.slot && typeof slot.slot === "object") {
-        return { ...slot.slot, ...slot };
+        return Object.assign({}, slot.slot, slot);
     }
     return slot;
 }
@@ -175,16 +173,14 @@ function _attachServiceId(slot, forcedServiceId, traceId, ctx) {
     if (!normalizedSlot) return null;
     const serviceId = _safeTrim(forcedServiceId);
     if (!serviceId || !_looksLikeGuid(serviceId)) {
-        log.error("_attachServiceId: invalid serviceId", { traceId, ctx, serviceId });
+        log.error("_attachServiceId: invalid serviceId", { traceId: traceId, ctx: ctx, serviceId: serviceId });
         return null;
     }
-    return {
-        ...normalizedSlot,
-        serviceId,
-        ...(normalizedSlot.slot && typeof normalizedSlot.slot === "object"
-            ? { slot: { ...normalizedSlot.slot, serviceId } }
-            : {})
-    };
+    const attached = Object.assign({}, normalizedSlot, { serviceId: serviceId });
+    if (normalizedSlot.slot && typeof normalizedSlot.slot === "object") {
+        attached.slot = Object.assign({}, normalizedSlot.slot, { serviceId: serviceId });
+    }
+    return attached;
 }
 
 function _isValidMadridYmd(value) {
@@ -205,11 +201,13 @@ function _isValidMadridYmd(value) {
 function _normalizeResourceIds(resourceId, traceId) {
     if (!resourceId) return [];
     const normalized = _safeTrim(resourceId);
-    if (!normalized || ["all", "any"].includes(normalized.toLowerCase())) return [];
+    if (!normalized) return [];
+    const lower = normalized.toLowerCase();
+    if (lower === "all" || lower === "any") return [];
     if (_looksLikeGuid(normalized)) return [normalized];
     log.warn("_normalizeResourceIds: invalid resource identifier", {
         resourceId: normalized,
-        traceId
+        traceId: traceId
     });
     return [];
 }
@@ -217,7 +215,7 @@ function _normalizeResourceIds(resourceId, traceId) {
 function _getResourceIdsFromSlot(slot) {
     const normalizedSlot = _normalizeSlotShape(slot);
     if (!normalizedSlot || typeof normalizedSlot !== "object") return [];
-    let groups = [];
+    var groups = [];
     if (Array.isArray(normalizedSlot.availableResources)) {
         groups = normalizedSlot.availableResources;
     } else if (
@@ -228,25 +226,25 @@ function _getResourceIdsFromSlot(slot) {
         groups = normalizedSlot.slot.availableResources;
     }
     if (groups.length > 0) {
-        const staffGroup = groups.find(
-            (group) =>
-                String(group?.resourceTypeId) === String(STAFF_RESOURCE_TYPE_ID)
-        );
+        const staffGroup = groups.find(function (group) {
+            return String(group && group.resourceTypeId) === String(STAFF_RESOURCE_TYPE_ID);
+        });
         if (!staffGroup) return [];
-        return Array.from(
-            new Set(
-                (staffGroup.resources || [])
-                    .map((resource) =>
-                        _safeTrim(resource?.id || resource?._id || resource?.resourceId)
-                    )
-                    .filter((resourceId) => _looksLikeGuid(resourceId))
-            )
-        );
+        const collected = (staffGroup.resources || [])
+            .map(function (resource) {
+                return _safeTrim(
+                    (resource && resource.id) ||
+                    (resource && resource._id) ||
+                    (resource && resource.resourceId)
+                );
+            })
+            .filter(function (rid) { return _looksLikeGuid(rid); });
+        return Array.from(new Set(collected));
     }
     const directId = _safeTrim(
-        normalizedSlot.resource?.id ||
-        normalizedSlot.resource?._id ||
-        normalizedSlot.resource?.resourceId ||
+        (normalizedSlot.resource && normalizedSlot.resource.id) ||
+        (normalizedSlot.resource && normalizedSlot.resource._id) ||
+        (normalizedSlot.resource && normalizedSlot.resource.resourceId) ||
         normalizedSlot.resourceId
     );
     return _looksLikeGuid(directId) ? [directId] : [];
@@ -279,25 +277,22 @@ async function _getStaffDisplayNamePublic(resourceId) {
 function _getRequestedAddonContext(service, requestedAddonIds) {
     const requested = new Set(
         (Array.isArray(requestedAddonIds) ? requestedAddonIds : [])
-            .map((id) => _safeTrim(id))
+            .map(function (id) { return _safeTrim(id); })
             .filter(Boolean)
     );
-    const addOnOptions = Array.isArray(service?.addOnOptions)
+    const addOnOptions = Array.isArray(service && service.addOnOptions)
         ? service.addOnOptions
         : [];
-    const selected = addOnOptions.filter((addon) => {
-        const id = _safeTrim(addon?.addOnId);
-        const nativeId = _safeTrim(addon?.nativeId);
+    const selected = addOnOptions.filter(function (addon) {
+        const id = _safeTrim(addon && addon.addOnId);
+        const nativeId = _safeTrim(addon && addon.nativeId);
         return requested.has(id) || requested.has(nativeId);
     });
+    const nativeIds = selected
+        .map(function (addon) { return _safeTrim((addon && addon.nativeId) || (addon && addon.addOnId)); })
+        .filter(function (id) { return _looksLikeGuid(id); });
     return {
-        nativeAddonIds: Array.from(
-            new Set(
-                selected
-                    .map((addon) => _safeTrim(addon?.nativeId || addon?.addOnId))
-                    .filter((id) => _looksLikeGuid(id))
-            )
-        ),
+        nativeAddonIds: Array.from(new Set(nativeIds)),
         addOnOptions: selected
     };
 }
@@ -306,46 +301,42 @@ function _resolveAddonContextInternal(service, requestedAddonIds) {
     return _getRequestedAddonContext(service, requestedAddonIds);
 }
 
-async function _verifyRequiredStaffViaGet({
-    serviceId,
-    start,
-    end,
-    requiredResourceId,
-    nativeAddonIds,
-    traceId
-}) {
+async function _verifyRequiredStaffViaGet(params) {
     const getPayload = {
-        serviceId: String(serviceId),
-        localStartDate: start,
-        localEndDate: end,
+        serviceId: String(params.serviceId),
+        localStartDate: params.start,
+        localEndDate: params.end,
         location: LOCATION_TS,
         timeZone: SDK_CONFIG.TZ,
         resourceTypes: [
-            { resourceTypeId: STAFF_RESOURCE_TYPE_ID, resourceIds: [requiredResourceId] }
+            { resourceTypeId: STAFF_RESOURCE_TYPE_ID, resourceIds: [params.requiredResourceId] }
         ]
     };
-    if (Array.isArray(nativeAddonIds) && nativeAddonIds.length > 0) {
-        getPayload.customerChoices = { addOnIds: nativeAddonIds };
+    if (Array.isArray(params.nativeAddonIds) && params.nativeAddonIds.length > 0) {
+        getPayload.customerChoices = { addOnIds: params.nativeAddonIds };
     }
     try {
         const result = await _executeWithRetry(
-            () =>
-                withTimeout(
-                    () => availabilityTimeSlots.getAvailabilityTimeSlot(getPayload),
+            function () {
+                return withTimeout(
+                    function () { return availabilityTimeSlots.getAvailabilityTimeSlot(getPayload); },
                     WATCHDOG_TIMEOUT_MS,
                     "exactSlot:verifyStaffGet"
-                ),
+                );
+            },
             2,
             300
         );
-        if (result?.timeSlot) return { ok: true, slot: result.timeSlot, errorCode: null };
+        if (result && result.timeSlot) {
+            return { ok: true, slot: result.timeSlot, errorCode: null };
+        }
         return { ok: false, slot: null, errorCode: "STAFF_UNAVAILABLE" };
     } catch (error) {
         log.warn("getAvailabilityTimeSlot verification failed", {
-            traceId,
-            serviceId: String(serviceId),
-            requiredResourceId,
-            message: error?.message
+            traceId: params.traceId,
+            serviceId: String(params.serviceId),
+            requiredResourceId: params.requiredResourceId,
+            message: error && error.message
         });
         return { ok: false, slot: null, errorCode: "STAFF_UNAVAILABLE" };
     }
@@ -354,15 +345,22 @@ async function _verifyRequiredStaffViaGet({
 // ============================================================================
 // SERVICE CATALOG
 // ============================================================================
-export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = null) {
+export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId) {
     const traceId = externalTraceId || makeTraceId("service");
     const raw = _safeTrim(slugOrId);
     const isGuid = _looksLikeGuid(raw);
-    const clean = isGuid
-        ? raw
-        : _safeTrim(raw)
-            ? String(raw).split("?")[0].split("#")[0].replace(/^\//, "").replace(/\/$/, "")
-            : "";
+    
+    // UNICODE-SLUG-FIX: Preserve exact slug value including ñ and accents.
+    // Only strip query params and fragments, never normalize characters.
+    let clean = raw;
+    if (!isGuid && raw) {
+        clean = String(raw)
+            .split("?")[0]
+            .split("#")[0]
+            .replace(/^\/+/, "")
+            .replace(/\/+$/, "");
+    }
+    
     if (!clean) {
         return {
             status: "ERROR",
@@ -370,65 +368,68 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = 
             error: { code: "SERVICE_NOT_FOUND", message: "Service identifier is required." }
         };
     }
+    
     const cached = serviceCatalogRAM.get(clean);
     if (cached && Date.now() - cached.timestamp < SERVICE_CACHE_TTL_MS) {
         return { status: "SUCCESS", data: cached.data, error: null };
     }
+    
     try {
         let service = null;
         if (isGuid) {
             service = await withTimeout(
-                () => queryFirstItem({
-                    dataCollectionId: SERVICIOS_COL,
-                    filter: { $or: [{ serviceId: { $eq: clean } }, { servicioID: { $eq: clean } }] },
-                    consistency: CONSISTENCY.STRONG
-                }),
+                function () {
+                    return queryFirstItem({
+                        dataCollectionId: SERVICIOS_COL,
+                        filter: { serviceId: { $eq: clean } },
+                        consistency: CONSISTENCY.STRONG
+                    });
+                },
                 WATCHDOG_TIMEOUT_MS,
                 "getServiceBySlugOrId:serviceId"
             );
         } else {
+            // UNICODE-SLUG-FIX: Search by exact slug match (preserves ñ)
             service = await withTimeout(
-                () => queryFirstItem({
-                    dataCollectionId: SERVICIOS_COL,
-                    filter: { slug: { $eq: clean } },
-                    consistency: CONSISTENCY.STRONG
-                }),
+                function () {
+                    return queryFirstItem({
+                        dataCollectionId: SERVICIOS_COL,
+                        filter: { slug: { $eq: clean } },
+                        consistency: CONSISTENCY.STRONG
+                    });
+                },
                 WATCHDOG_TIMEOUT_MS,
                 "getServiceBySlugOrId:slug"
             );
         }
+        
+        // Fallback: try servicioID legacy field
         if (!service && isGuid) {
             service = await withTimeout(
-                () => queryFirstItem({
-                    dataCollectionId: SERVICIOS_COL,
-                    filter: { $or: [{ serviceId: { $eq: clean } }, { servicioID: { $eq: clean } }] },
-                    consistency: CONSISTENCY.STRONG
-                }),
+                function () {
+                    return queryFirstItem({
+                        dataCollectionId: SERVICIOS_COL,
+                        filter: { servicioID: { $eq: clean } },
+                        consistency: CONSISTENCY.STRONG
+                    });
+                },
                 WATCHDOG_TIMEOUT_MS,
-                "getServiceBySlugOrId:guidFallback"
+                "getServiceBySlugOrId:legacyFallback"
             );
         }
+        
         if (!service) {
-            log.error("Service not found in catalog", { key: clean, traceId });
+            log.error("Service not found in catalog", { key: clean, traceId: traceId });
             return {
                 status: "ERROR",
                 data: null,
                 error: { code: "SERVICE_NOT_FOUND", message: "Service not found." }
             };
         }
+        
         service = _normalizeCatalogService(service);
         const mapped = await _mapServiceImport2ToUX(service, traceId);
-        const allStaff = await listStaff(traceId);
-        mapped.staffOptions = allStaff
-            .filter((person) => person && person.resourceId)
-            .map((person) => ({
-                resourceId: person.resourceId,
-                id: person.resourceId,
-                value: person.resourceId,
-                name: person.displayName || person.staffName || "Profesional",
-                label: person.displayName || person.staffName || "Profesional"
-            }));
-        mapped.availableStaff = mapped.staffOptions.map((person) => person.resourceId);
+        
         const cacheEntry = { data: mapped, timestamp: Date.now() };
         _cacheSetBounded(serviceCatalogRAM, clean, cacheEntry, CACHE_MAX_SIZE);
         if (mapped.serviceId) {
@@ -437,15 +438,16 @@ export async function _getServiceBySlugOrIdInternal(slugOrId, externalTraceId = 
         if (mapped.slug) {
             _cacheSetBounded(serviceCatalogRAM, mapped.slug, cacheEntry, CACHE_MAX_SIZE);
         }
+        
         return { status: "SUCCESS", data: mapped, error: null };
     } catch (error) {
-        log.error("Error loading service", { traceId, message: error?.message });
+        log.error("Error loading service", { traceId: traceId, message: error && error.message });
         return {
             status: "ERROR",
             data: null,
             error: {
                 code: "DATABASE_ERROR",
-                message: error?.message || "Error loading service."
+                message: (error && error.message) || "Error loading service."
             }
         };
     }
@@ -457,7 +459,7 @@ export async function _resolveServiceIdInternal(serviceIdReq) {
     const key = _looksLikeGuid(raw) ? raw : _safeSlugOrId(raw);
     if (!key) return null;
     const result = await _getServiceBySlugOrIdInternal(key);
-    if (result?.status === "SUCCESS" && result?.data?.serviceId) {
+    if (result && result.status === "SUCCESS" && result.data && result.data.serviceId) {
         const serviceId = _safeTrim(result.data.serviceId);
         if (_looksLikeGuid(serviceId)) return serviceId;
     }
@@ -469,18 +471,22 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     if (!_looksLikeGuid(serviceId)) {
         throw new Error("Catalog serviceId is missing or invalid.");
     }
+    
     const clientHidden = _readServiceField(service, "clientHidden") === true;
     const allowCombine = !clientHidden && _readServiceField(service, "allowCombine") === true;
     const linkedPhases = _safeTrim(_readServiceField(service, "linkedPhases"));
+    
     if (allowCombine && !_looksLikeGuid(linkedPhases)) {
         throw new Error("Dual service linkedPhases is missing or invalid.");
     }
     if (allowCombine && _looksLikeGuid(linkedPhases) && linkedPhases === serviceId) {
         throw new Error("A service cannot link to itself (linkedPhases === serviceId).");
     }
+    
     const phase1Duration = Number(_readServiceField(service, "phase1Duration")) || 0;
     const exposureDuration = Number(_readServiceField(service, "exposureDuration")) || 0;
     let phase2Duration = Number(_readServiceField(service, "phase2Duration")) || 0;
+    
     if (allowCombine && _looksLikeGuid(linkedPhases)) {
         const visited = new Set([serviceId]);
         const resolved = await resolveLinkedPhase2Duration(
@@ -491,6 +497,7 @@ export async function _mapServiceImport2ToUX(service, traceId) {
         );
         if (resolved > 0) phase2Duration = resolved;
     }
+    
     const title = _safeTrim(_readServiceField(service, "title")) || "Service";
     const price = Number(_readServiceField(service, "price")) || 0;
     const currency = _safeTrim(_readServiceField(service, "currency")) || "EUR";
@@ -511,19 +518,24 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     const shortDescription = _safeTrim(_readServiceField(service, "tagLine")) || null;
     const longDescription = _safeTrim(_readServiceField(service, "description")) || null;
     const internalNotes = _safeTrim(_readServiceField(service, "internalNotes")) || null;
+    const recommendations = Array.isArray(_readServiceField(service, "recommendations"))
+        ? _readServiceField(service, "recommendations")
+        : [];
     const durationRange = readDurationRange(service);
+    
     const phaseSum = allowCombine
         ? phase1Duration + exposureDuration + phase2Duration
         : phase1Duration;
     const estimatedTotal = phaseSum;
+    
     const availableStaff = cleanGuidList(_readServiceField(service, "availableStaff"));
-
-    // FIX-DTO-STAFF-01: el HTML espera person.resourceId y person.name.
+    
+    // FIX-DTO-STAFF-01: HTML expects person.resourceId and person.name
     const staffOptions = await Promise.all(
-        availableStaff.map(async (resourceId) => {
+        availableStaff.map(async function (resourceId) {
             const displayName = await _getStaffDisplayNamePublic(resourceId);
             return {
-                resourceId,
+                resourceId: resourceId,
                 id: resourceId,
                 value: resourceId,
                 name: displayName,
@@ -531,48 +543,49 @@ export async function _mapServiceImport2ToUX(service, traceId) {
             };
         })
     );
-
+    
     const addOnOptions = (Array.isArray(_readServiceField(service, "addOnOptions"))
         ? _readServiceField(service, "addOnOptions")
         : []
     )
         .map(_normalizeAddon)
         .filter(Boolean);
-
+    
     return {
-        serviceId,
-        slug,
-        serviceType,
-        sku,
-        categoryId,
-        locationId,
+        serviceId: serviceId,
+        slug: slug,
+        serviceType: serviceType,
+        sku: sku,
+        categoryId: categoryId,
+        locationId: locationId,
         localizacion: location,
-        internalNotes,
+        internalNotes: internalNotes,
         permitirCombinar: allowCombine,
         tiempoFase1: phase1Duration,
         tiempoExposicion: exposureDuration,
         tiempoFase2: phase2Duration,
         duracionTotal: estimatedTotal,
-        availableStaff,
-        staffOptions,
-        depositAmount,
-        depositType,
-        onlinePayment,
-        inPersonPayment,
-        taxIncluded,
-        tipoImpositivo,
-        pricingModel,
-        currency,
+        availableStaff: availableStaff,
+        staffOptions: staffOptions,
+        depositAmount: depositAmount,
+        depositType: depositType,
+        onlinePayment: onlinePayment,
+        inPersonPayment: inPersonPayment,
+        taxIncluded: taxIncluded,
+        tipoImpositivo: tipoImpositivo,
+        pricingModel: pricingModel,
+        currency: currency,
         linkedPhases: allowCombine ? linkedPhases : null,
-        allowCombine,
-        phase1Duration,
-        exposureDuration,
-        phase2Duration,
+        allowCombine: allowCombine,
+        phase1Duration: phase1Duration,
+        exposureDuration: exposureDuration,
+        phase2Duration: phase2Duration,
         totalDuration: estimatedTotal,
-        clientHidden,
-        durationRange,
-        addOnOptions,
-        mainMedia,
+        clientHidden: clientHidden,
+        durationRange: durationRange,
+        addOnOptions: addOnOptions,
+        recommendations: recommendations,
+        mainMedia: mainMedia,
         metadata: {
             titulo: title,
             tituloServicio: title,
@@ -581,19 +594,20 @@ export async function _mapServiceImport2ToUX(service, traceId) {
             localizacion: location,
             resumenCorto: shortDescription,
             descripcionLarga: longDescription,
-            pricingModel,
-            addOnOptions,
-            mainMedia,
-            currency,
-            tipoImpositivo,
-            pricing: { base: price, currency },
-            timing: { estimatedTotal, totalDuration: estimatedTotal },
-            durationRange
+            pricingModel: pricingModel,
+            addOnOptions: addOnOptions,
+            recomendaciones: recommendations,
+            mainMedia: mainMedia,
+            currency: currency,
+            tipoImpositivo: tipoImpositivo,
+            pricing: { base: price, currency: currency },
+            timing: { estimatedTotal: estimatedTotal, totalDuration: estimatedTotal },
+            durationRange: durationRange
         }
     };
 }
 
-export async function getServiceForBookingInternal(serviceId, traceId = null) {
+export async function getServiceForBookingInternal(serviceId, traceId) {
     return _getServiceBySlugOrIdInternal(
         serviceId,
         traceId || makeTraceId("service-internal")
@@ -605,11 +619,11 @@ export async function getServiceForBookingInternal(serviceId, traceId = null) {
 // ============================================================================
 export const getServiceBySlugOrId = webMethod(
     Permissions.Anyone,
-    async (slugOrId) => {
+    async function (slugOrId) {
         const traceId = makeTraceId("wm-service");
         try {
             const result = await _getServiceBySlugOrIdInternal(slugOrId, traceId);
-            if (result?.status !== "SUCCESS") return result;
+            if (!result || result.status !== "SUCCESS") return result;
             return {
                 status: "SUCCESS",
                 data: _toPublicService(result.data),
@@ -627,7 +641,7 @@ export const getServiceBySlugOrId = webMethod(
 
 export const resolveServiceId = webMethod(
     Permissions.Anyone,
-    async (serviceIdRequest) => {
+    async function (serviceIdRequest) {
         try {
             const resolved = await _resolveServiceIdInternal(serviceIdRequest);
             if (!resolved) {
@@ -650,11 +664,10 @@ export const resolveServiceId = webMethod(
 
 export function _toPublicService(service) {
     if (!service || typeof service !== "object") return null;
-    const { internalNotes, ...publicService } = service;
-    return {
-        ...publicService,
-        linkedPhases: publicService.linkedPhases || null
-    };
+    const publicService = Object.assign({}, service);
+    delete publicService.internalNotes;
+    publicService.linkedPhases = publicService.linkedPhases || null;
+    return publicService;
 }
 
 // ============================================================================
@@ -674,7 +687,8 @@ const _CONFIRMATION_DTO_FIELDS = Object.freeze([
 function _toConfirmationDto(item) {
     if (!item || typeof item !== "object") return null;
     const dto = {};
-    for (const key of _CONFIRMATION_DTO_FIELDS) {
+    for (var i = 0; i < _CONFIRMATION_DTO_FIELDS.length; i++) {
+        const key = _CONFIRMATION_DTO_FIELDS[i];
         if (item[key] !== undefined && item[key] !== null) dto[key] = item[key];
     }
     const rawStatus = item[BOOKING_FIELDS.STATUS];
@@ -691,37 +705,38 @@ function _toConfirmationDto(item) {
 
 export const getConfirmedBookingForDisplay = webMethod(
     Permissions.Anyone,
-    async ({ bookingId } = {}) => {
+    async function (params) {
         const traceId = makeTraceId("confirmacion-booking");
-        const cleanId = _safeTrim(bookingId);
+        const cleanId = _safeTrim(params && params.bookingId);
         if (!cleanId) {
             return { ok: false, data: null, error: "BOOKING_ID_REQUIRED" };
         }
         try {
             const item = await withTimeout(
-                () => queryFirstItem({
-                    dataCollectionId: BUSINESS_COLLECTIONS.CITAS_F2,
-                    filter: { bookingId: { $eq: cleanId } },
-                    consistency: CONSISTENCY.STRONG
-                }),
-                Number(SDK_CONFIG?.TIMEOUTS?.API_MS) || 15000,
+                function () {
+                    return queryFirstItem({
+                        dataCollectionId: BUSINESS_COLLECTIONS.CITAS_F2,
+                        filter: { bookingId: { $eq: cleanId } },
+                        consistency: CONSISTENCY.STRONG
+                    });
+                },
+                Number(SDK_CONFIG && SDK_CONFIG.TIMEOUTS && SDK_CONFIG.TIMEOUTS.API_MS) || 15000,
                 "getConfirmedBookingForDisplay"
             );
             if (!item) return { ok: false, data: null, error: "NOT_FOUND" };
             const status = normalizeBookingStatus(
-                item[BOOKING_FIELDS.STATUS] ?? item.status
+                item[BOOKING_FIELDS.STATUS] !== undefined && item[BOOKING_FIELDS.STATUS] !== null
+                    ? item[BOOKING_FIELDS.STATUS]
+                    : item.status
             );
-            if (
-                status !== BOOKING_STATUS.CONFIRMED &&
-                status !== BOOKING_STATUS.PENDING
-            ) {
+            if (status !== BOOKING_STATUS.CONFIRMED && status !== BOOKING_STATUS.PENDING) {
                 return { ok: false, data: null, error: "NOT_CONFIRMED" };
             }
             return { ok: true, data: _toConfirmationDto(item), error: null };
         } catch (err) {
             log.warn("getConfirmedBookingForDisplay failed", {
-                traceId,
-                error: err?.message
+                traceId: traceId,
+                error: err && err.message
             });
             return { ok: false, data: null, error: "READ_FAILED" };
         }
@@ -733,11 +748,11 @@ export const getConfirmedBookingForDisplay = webMethod(
 // ============================================================================
 export const getAvailableSlots = webMethod(
     Permissions.Anyone,
-    async (serviceIdOrSlug, resourceId, dateYmd, addOnIds = []) => {
+    async function (serviceIdOrSlug, resourceId, dateYmd, addOnIds) {
         const traceId = makeTraceId("available-slots");
         try {
             const serviceResult = await _getServiceBySlugOrIdInternal(serviceIdOrSlug, traceId);
-            if (serviceResult?.status !== "SUCCESS" || !serviceResult.data?.serviceId) {
+            if (!serviceResult || serviceResult.status !== "SUCCESS" || !serviceResult.data || !serviceResult.data.serviceId) {
                 return {
                     status: "ERROR",
                     data: null,
@@ -746,9 +761,10 @@ export const getAvailableSlots = webMethod(
             }
             const service = serviceResult.data;
             const serviceId = service.serviceId;
+            
             if (service.allowCombine === true) {
                 log.warn("getAvailableSlots called for dual service", {
-                    traceId,
+                    traceId: traceId,
                     serviceId: String(serviceId)
                 });
                 return {
@@ -760,8 +776,10 @@ export const getAvailableSlots = webMethod(
                     }
                 };
             }
+            
             const requestedResourceId = _normalizeResourceIds(resourceId, traceId);
-            const addonContext = _resolveAddonContextInternal(service, addOnIds);
+            const addonContext = _resolveAddonContextInternal(service, Array.isArray(addOnIds) ? addOnIds : []);
+            
             if (addonContext.nativeAddonIds.length > 0 && service.durationRange) {
                 return {
                     status: "ERROR",
@@ -772,6 +790,7 @@ export const getAvailableSlots = webMethod(
                     }
                 };
             }
+            
             const ymd = _safeTrim(dateYmd);
             if (!_isValidMadridYmd(ymd)) {
                 return {
@@ -780,10 +799,11 @@ export const getAvailableSlots = webMethod(
                     error: { code: "INVALID_DATE", message: "Invalid booking date." }
                 };
             }
+            
             const payload = {
                 serviceId: String(serviceId),
-                fromLocalDate: `${ymd}T00:00:00`,
-                toLocalDate: `${ymd}T23:59:59`,
+                fromLocalDate: ymd + "T00:00:00",
+                toLocalDate: ymd + "T23:59:59",
                 timeZone: SDK_CONFIG.TZ,
                 bookable: true,
                 locations: [LOCATION_TS],
@@ -797,26 +817,30 @@ export const getAvailableSlots = webMethod(
             if (addonContext.nativeAddonIds.length > 0) {
                 payload.customerChoices = { addOnIds: addonContext.nativeAddonIds };
             }
+            
             const result = await _executeWithRetry(
-                () =>
-                    withTimeout(
-                        () => availabilityTimeSlots.listAvailabilityTimeSlots(payload),
+                function () {
+                    return withTimeout(
+                        function () { return availabilityTimeSlots.listAvailabilityTimeSlots(payload); },
                         WATCHDOG_TIMEOUT_MS,
                         "getAvailableSlots"
-                    ),
+                    );
+                },
                 2,
                 300
             );
-            const timeSlots = Array.isArray(result?.timeSlots) ? result.timeSlots : [];
+            
+            const timeSlots = Array.isArray(result && result.timeSlots) ? result.timeSlots : [];
             const slots = timeSlots
-                .filter((slot) => slot?.bookable === true)
-                .map((slot) => _attachServiceId(slot, serviceId, traceId, "getAvailableSlots"))
+                .filter(function (slot) { return slot && slot.bookable === true; })
+                .map(function (slot) { return _attachServiceId(slot, serviceId, traceId, "getAvailableSlots"); })
                 .filter(Boolean);
+            
             return {
                 status: "SUCCESS",
                 data: {
-                    slots,
-                    serviceId,
+                    slots: slots,
+                    serviceId: serviceId,
                     dateYmd: ymd,
                     resourceId: requestedResourceId[0] || null
                 },
@@ -824,10 +848,10 @@ export const getAvailableSlots = webMethod(
             };
         } catch (error) {
             log.warn("getAvailableSlots failed", {
-                traceId,
+                traceId: traceId,
                 serviceIdOrSlug: _safeTrim(serviceIdOrSlug),
                 dateYmd: _safeTrim(dateYmd),
-                message: error?.message
+                message: error && error.message
             });
             return {
                 status: "ERROR",
@@ -846,11 +870,11 @@ export const getAvailableSlots = webMethod(
 // ============================================================================
 export const getAvailableDays = webMethod(
     Permissions.Anyone,
-    async (serviceIdOrSlug, resourceId, year, month, addOnIds = []) => {
+    async function (serviceIdOrSlug, resourceId, year, month, addOnIds) {
         const traceId = makeTraceId("available-days");
         try {
             const serviceResult = await _getServiceBySlugOrIdInternal(serviceIdOrSlug, traceId);
-            if (serviceResult?.status !== "SUCCESS" || !serviceResult.data?.serviceId) {
+            if (!serviceResult || serviceResult.status !== "SUCCESS" || !serviceResult.data || !serviceResult.data.serviceId) {
                 return {
                     status: "ERROR",
                     data: null,
@@ -861,6 +885,7 @@ export const getAvailableDays = webMethod(
             const serviceId = service.serviceId;
             const y = Number(year);
             const m = Number(month);
+            
             if (!Number.isFinite(y) || !Number.isFinite(m) || m < 1 || m > 12) {
                 return {
                     status: "ERROR",
@@ -868,12 +893,14 @@ export const getAvailableDays = webMethod(
                     error: { code: "INVALID_DATE", message: "Invalid year/month." }
                 };
             }
+            
             const monthStr = String(m).padStart(2, "0");
-            const fromDate = `${y}-${monthStr}-01T00:00:00`;
+            const fromDate = y + "-" + monthStr + "-01T00:00:00";
             const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
-            const toDate = `${y}-${monthStr}-${String(lastDay).padStart(2, "0")}T23:59:59`;
+            const toDate = y + "-" + monthStr + "-" + String(lastDay).padStart(2, "0") + "T23:59:59";
             const requestedResourceId = _normalizeResourceIds(resourceId, traceId);
-            const addonContext = _resolveAddonContextInternal(service, addOnIds);
+            const addonContext = _resolveAddonContextInternal(service, Array.isArray(addOnIds) ? addOnIds : []);
+            
             const payload = {
                 serviceId: String(serviceId),
                 fromLocalDate: fromDate,
@@ -891,47 +918,50 @@ export const getAvailableDays = webMethod(
             if (addonContext.nativeAddonIds.length > 0 && !service.durationRange) {
                 payload.customerChoices = { addOnIds: addonContext.nativeAddonIds };
             }
+            
             const result = await _executeWithRetry(
-                () =>
-                    withTimeout(
-                        () => availabilityTimeSlots.listAvailabilityTimeSlots(payload),
+                function () {
+                    return withTimeout(
+                        function () { return availabilityTimeSlots.listAvailabilityTimeSlots(payload); },
                         WATCHDOG_TIMEOUT_MS,
                         "getAvailableDays"
-                    ),
+                    );
+                },
                 2,
                 300
             );
-            // FIX-DIAG-DAYS-02A: diagnostico temporal
+            
+            // FIX-DIAG-DAYS-02A: diagnostic log
             log.info("getAvailableDays availability response", {
-                traceId,
-                serviceId,
+                traceId: traceId,
+                serviceId: serviceId,
                 year: y,
                 month: m,
-                timeSlotCount: Array.isArray(result && result.timeSlots)
-                    ? result.timeSlots.length
-                    : null,
+                timeSlotCount: Array.isArray(result && result.timeSlots) ? result.timeSlots.length : null,
                 hasTimeSlotsArray: Array.isArray(result && result.timeSlots)
             });
-            const timeSlots = Array.isArray(result?.timeSlots) ? result.timeSlots : [];
+            
+            const timeSlots = Array.isArray(result && result.timeSlots) ? result.timeSlots : [];
             const daySet = new Set();
-            for (const slot of timeSlots) {
-                if (slot?.bookable !== true) continue;
-                const localStart = _normalizeLocalIsoStr(
-                    slot?.localStartDate || slot?.startDate
-                );
+            for (var i = 0; i < timeSlots.length; i++) {
+                const slot = timeSlots[i];
+                if (!slot || slot.bookable !== true) continue;
+                const localStart = _normalizeLocalIsoStr(slot.localStartDate || slot.startDate);
                 if (!localStart) continue;
                 daySet.add(localStart.slice(0, 10));
             }
-            // FIX-DIAG-DAYS-02B: diagnostico temporal
+            
+            // FIX-DIAG-DAYS-02B: diagnostic log
             log.info("getAvailableDays days computed", {
-                traceId,
+                traceId: traceId,
                 dayCount: daySet.size
             });
+            
             return {
                 status: "SUCCESS",
                 data: {
                     days: Array.from(daySet).sort(),
-                    serviceId,
+                    serviceId: serviceId,
                     year: y,
                     month: m,
                     resourceId: requestedResourceId[0] || null
@@ -939,9 +969,9 @@ export const getAvailableDays = webMethod(
                 error: null
             };
         } catch (error) {
-            // FIX-DIAG-DAYS-01: log.error con contexto tecnico completo
+            // FIX-DIAG-DAYS-01: full technical context in log
             log.error("getAvailableDays failed", {
-                traceId,
+                traceId: traceId,
                 serviceKey: _safeTrim(serviceIdOrSlug),
                 resourceId: _safeTrim(resourceId) || null,
                 year: Number(year),
@@ -958,7 +988,7 @@ export const getAvailableDays = webMethod(
                 error: {
                     code: "AVAILABLE_DAYS_FAILED",
                     message: "Could not load available days.",
-                    traceId
+                    traceId: traceId
                 }
             };
         }
@@ -972,8 +1002,8 @@ async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
     const ymd = _safeTrim(dateYmd);
     const ids = cleanGuidList(resourceIds);
     const loadByResource = {};
-    for (const id of ids) {
-        loadByResource[id] = 0;
+    for (var i = 0; i < ids.length; i++) {
+        loadByResource[ids[i]] = 0;
     }
     if (!ymd || ids.length === 0) {
         return loadByResource;
@@ -982,25 +1012,29 @@ async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
     const idSet = new Set(ids);
     try {
         const result = await withTimeout(
-            () => queryItems({
-                dataCollectionId: BUSINESS_COLLECTIONS.CITAS_F2,
-                filter: { dateYmd: { $eq: ymd } },
-                limit: STAFF_LOAD_QUERY_LIMIT,
-                consistency: CONSISTENCY.STRONG
-            }),
+            function () {
+                return queryItems({
+                    dataCollectionId: BUSINESS_COLLECTIONS.CITAS_F2,
+                    filter: { dateYmd: { $eq: ymd } },
+                    limit: STAFF_LOAD_QUERY_LIMIT,
+                    consistency: CONSISTENCY.STRONG
+                });
+            },
             WATCHDOG_TIMEOUT_MS,
             "staffLoad:countDay"
         );
-        for (const item of result?.items || []) {
-            const rawStatus = item?.bookingStatus;
+        const items = (result && Array.isArray(result.items)) ? result.items : [];
+        for (var j = 0; j < items.length; j++) {
+            const item = items[j];
+            const rawStatus = item && item.bookingStatus;
             if (rawStatus === undefined || rawStatus === null) {
-                log.warn("CitasF2 fila sin bookingStatus (usa legacy status), migrar antes de EOL 31/12/2026", { id: item?._id });
+                log.warn("CitasF2 fila sin bookingStatus (usa legacy status), migrar antes de EOL 31/12/2026", { id: item && item._id });
             }
-            const status = String(rawStatus || "").trim().toUpperCase();
+            const status = String((item && (item.bookingStatus || item.status)) || "").trim().toUpperCase();
             if (status === cancelled || status === "CANCELED" || status === "CANCELLED") {
                 continue;
             }
-            const resourceId = _safeTrim(item?.resourceId);
+            const resourceId = _safeTrim(item && item.resourceId);
             if (!resourceId || !idSet.has(resourceId)) {
                 continue;
             }
@@ -1008,9 +1042,9 @@ async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
         }
     } catch (error) {
         log.warn("_countStaffLoadForDay failed; using zero loads", {
-            traceId,
+            traceId: traceId,
             dateYmd: ymd,
-            message: error?.message
+            message: error && error.message
         });
     }
     return loadByResource;
@@ -1019,10 +1053,10 @@ async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
 // ============================================================================
 // DISPONIBILIDAD DUAL
 // ============================================================================
-export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, dateYmd, addOnIds = []) {
+export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, dateYmd, addOnIds) {
     const traceId = makeTraceId("dual-slots");
     const serviceRes = await _getServiceBySlugOrIdInternal(serviceId, traceId);
-    if (serviceRes?.status !== "SUCCESS" || !serviceRes?.data) {
+    if (!serviceRes || serviceRes.status !== "SUCCESS" || !serviceRes.data) {
         return {
             status: "ERROR",
             data: null,
@@ -1046,7 +1080,7 @@ export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, date
         };
     }
     const requestedResourceId = _normalizeResourceIds(resourceId, traceId);
-    const addonContext = _resolveAddonContextInternal(service, addOnIds);
+    const addonContext = _resolveAddonContextInternal(service, Array.isArray(addOnIds) ? addOnIds : []);
     if (addonContext.nativeAddonIds.length > 0 && service.durationRange) {
         return {
             status: "ERROR",
@@ -1057,11 +1091,12 @@ export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, date
             }
         };
     }
-    const buildListPayload = (svcId) => {
+    
+    const buildListPayload = function (svcId) {
         const payload = {
             serviceId: String(svcId),
-            fromLocalDate: `${ymd}T00:00:00`,
-            toLocalDate: `${ymd}T23:59:59`,
+            fromLocalDate: ymd + "T00:00:00",
+            toLocalDate: ymd + "T23:59:59",
             timeZone: SDK_CONFIG.TZ,
             bookable: true,
             locations: [LOCATION_TS],
@@ -1077,81 +1112,88 @@ export async function _getCertifiedDualSlotsInternal(serviceId, resourceId, date
         }
         return payload;
     };
+    
     const f1Res = await _executeWithRetry(
-        () =>
-            withTimeout(
-                () => availabilityTimeSlots.listAvailabilityTimeSlots(buildListPayload(service.serviceId)),
+        function () {
+            return withTimeout(
+                function () { return availabilityTimeSlots.listAvailabilityTimeSlots(buildListPayload(service.serviceId)); },
                 WATCHDOG_TIMEOUT_MS,
                 "dual:listF1"
-            ),
+            );
+        },
         2,
         300
     );
-    const f1Slots = (Array.isArray(f1Res?.timeSlots) ? f1Res.timeSlots : []).filter(
-        (s) => s?.bookable === true
-    );
+    const f1Slots = (Array.isArray(f1Res && f1Res.timeSlots) ? f1Res.timeSlots : [])
+        .filter(function (s) { return s && s.bookable === true; });
+    
     const f2Res = await _executeWithRetry(
-        () =>
-            withTimeout(
-                () => availabilityTimeSlots.listAvailabilityTimeSlots(buildListPayload(service.linkedPhases)),
+        function () {
+            return withTimeout(
+                function () { return availabilityTimeSlots.listAvailabilityTimeSlots(buildListPayload(service.linkedPhases)); },
                 WATCHDOG_TIMEOUT_MS,
                 "dual:listF2"
-            ),
+            );
+        },
         2,
         300
     );
-    const f2Slots = (Array.isArray(f2Res?.timeSlots) ? f2Res.timeSlots : []).filter(
-        (s) => s?.bookable === true
-    );
+    const f2Slots = (Array.isArray(f2Res && f2Res.timeSlots) ? f2Res.timeSlots : [])
+        .filter(function (s) { return s && s.bookable === true; });
+    
     const staffPool = cleanGuidList(service.availableStaff || []);
     const loadByResource = await _countStaffLoadForDay(ymd, staffPool, traceId);
     const pairs = [];
-    for (const f1 of f1Slots) {
-        const f1Start = _normalizeLocalIsoStr(f1?.localStartDate || f1?.startDate);
-        const f1End = _normalizeLocalIsoStr(f1?.localEndDate || f1?.endDate);
+    
+    for (var fi = 0; fi < f1Slots.length; fi++) {
+        const f1 = f1Slots[fi];
+        const f1Start = _normalizeLocalIsoStr(f1.localStartDate || f1.startDate);
+        const f1End = _normalizeLocalIsoStr(f1.localEndDate || f1.endDate);
         if (!f1Start || !f1End) continue;
         const range = toUtcRange(f1Start, f1End);
         if (!range) continue;
         const f1Resources = _getResourceIdsFromSlot(f1);
-        for (const f2 of f2Slots) {
-            const f2Start = _normalizeLocalIsoStr(f2?.localStartDate || f2?.startDate);
-            const f2End = _normalizeLocalIsoStr(f2?.localEndDate || f2?.endDate);
+        
+        for (var fj = 0; fj < f2Slots.length; fj++) {
+            const f2 = f2Slots[fj];
+            const f2Start = _normalizeLocalIsoStr(f2.localStartDate || f2.startDate);
+            const f2End = _normalizeLocalIsoStr(f2.localEndDate || f2.endDate);
             if (!f2Start || !f2End) continue;
             const f2StartUtc = getUtcDateFromMadridLocal(f2Start);
             if (!f2StartUtc) continue;
             const gapMinutes = computeGapMinutes(range.endUtc, f2StartUtc);
             if (gapMinutes < 0 || gapMinutes > MINUTOS_MAX_HUECO_DUAL) continue;
             const f2Resources = _getResourceIdsFromSlot(f2);
-            const shared = f1Resources.filter((id) => f2Resources.includes(id));
+            const shared = f1Resources.filter(function (id) { return f2Resources.indexOf(id) >= 0; });
             if (shared.length === 0) continue;
             const pairResourceId =
-                requestedResourceId[0] && shared.includes(requestedResourceId[0])
+                (requestedResourceId[0] && shared.indexOf(requestedResourceId[0]) >= 0)
                     ? requestedResourceId[0]
-                    : pickStaffByLowestLoad(shared, loadByResource) || shared[0];
+                    : (pickStaffByLowestLoad(shared, loadByResource) || shared[0]);
             pairs.push({
                 fase1: {
-                    slotRef: { ..._normalizeSlotShape(f1), serviceId: service.serviceId },
+                    slotRef: Object.assign({}, _normalizeSlotShape(f1), { serviceId: service.serviceId }),
                     resourceId: pairResourceId
                 },
                 fase2: {
-                    slotRef: { ..._normalizeSlotShape(f2), serviceId: service.linkedPhases },
+                    slotRef: Object.assign({}, _normalizeSlotShape(f2), { serviceId: service.linkedPhases }),
                     resourceId: pairResourceId
                 },
                 pairToken: null,
                 serviceId: service.serviceId,
                 linkedPhases: service.linkedPhases,
                 dateYmd: ymd,
-                gapMinutes,
+                gapMinutes: gapMinutes,
                 exposureDuration: Number(service.exposureDuration || 0) || 0
             });
         }
     }
-    return { status: "SUCCESS", data: pairs, error: null, traceId };
+    return { status: "SUCCESS", data: pairs, error: null, traceId: traceId };
 }
 
 export const getCertifiedDualSlots = webMethod(
     Permissions.Anyone,
-    async (serviceIdOrSlug, resourceId, dateYmd, addOnIds = []) => {
+    async function (serviceIdOrSlug, resourceId, dateYmd, addOnIds) {
         try {
             const resolved = await _resolveServiceIdInternal(serviceIdOrSlug);
             if (!resolved) {
@@ -1175,18 +1217,9 @@ export const getCertifiedDualSlots = webMethod(
 // ============================================================================
 // RESOLUCION DE STAFF
 // ============================================================================
-export async function _resolveStaffForSlotInternal({
-    serviceId,
-    f1Start,
-    f1End,
-    f2Start,
-    f2End,
-    requestedResourceId,
-    addOnIds = [],
-    traceId
-}) {
-    const activeTraceId = traceId || makeTraceId("staff-resolve");
-    const resolved = await _resolveServiceIdInternal(serviceId);
+export async function _resolveStaffForSlotInternal(params) {
+    const activeTraceId = params.traceId || makeTraceId("staff-resolve");
+    const resolved = await _resolveServiceIdInternal(params.serviceId);
     if (!resolved) {
         return {
             status: "ERROR",
@@ -1194,27 +1227,28 @@ export async function _resolveStaffForSlotInternal({
             error: { code: "SERVICE_NOT_FOUND", message: "Service identifier not found." }
         };
     }
-    const normalizedAddonIds = Array.from(
-        new Set(
-            (Array.isArray(addOnIds) ? addOnIds : [])
-                .map((id) => _safeTrim(id))
-                .filter((id) => _looksLikeGuid(id))
-        )
-    ).sort();
+    const normalizedAddonIds = Array.from(new Set(
+        (Array.isArray(params.addOnIds) ? params.addOnIds : [])
+            .map(function (id) { return _safeTrim(id); })
+            .filter(function (id) { return _looksLikeGuid(id); })
+    )).sort();
+    
     const f1Result = await revalidateExactAvailabilitySlot({
         serviceId: resolved,
-        localStartDate: f1Start,
-        localEndDate: f1End,
-        resourceId: requestedResourceId || null,
+        localStartDate: params.f1Start,
+        localEndDate: params.f1End,
+        resourceId: params.requestedResourceId || null,
         nativeAddonIds: normalizedAddonIds,
         traceId: activeTraceId
     });
-    if (f1Result?.status !== "SUCCESS") return f1Result;
-    const finalResourceId = f1Result.data?.resourceId || requestedResourceId || null;
+    if (!f1Result || f1Result.status !== "SUCCESS") return f1Result;
+    
+    const finalResourceId = (f1Result.data && f1Result.data.resourceId) || params.requestedResourceId || null;
     let f2Result = null;
-    if (f2Start && f2End) {
+    
+    if (params.f2Start && params.f2End) {
         const serviceConfig = await _getServiceBySlugOrIdInternal(resolved, activeTraceId);
-        const linkedPhases = _safeTrim(serviceConfig?.data?.linkedPhases);
+        const linkedPhases = _safeTrim(serviceConfig && serviceConfig.data && serviceConfig.data.linkedPhases);
         if (!_looksLikeGuid(linkedPhases)) {
             return {
                 status: "ERROR",
@@ -1227,20 +1261,20 @@ export async function _resolveStaffForSlotInternal({
         }
         f2Result = await revalidateExactAvailabilitySlot({
             serviceId: linkedPhases,
-            localStartDate: f2Start,
-            localEndDate: f2End,
+            localStartDate: params.f2Start,
+            localEndDate: params.f2End,
             resourceId: finalResourceId,
             nativeAddonIds: normalizedAddonIds,
             traceId: activeTraceId
         });
-        if (f2Result?.status !== "SUCCESS") return f2Result;
+        if (!f2Result || f2Result.status !== "SUCCESS") return f2Result;
     }
     return {
         status: "SUCCESS",
         data: {
             resourceId: finalResourceId,
-            slotF1: f1Result.data?.slot || null,
-            slotF2: f2Result?.data?.slot || null
+            slotF1: (f1Result.data && f1Result.data.slot) || null,
+            slotF2: (f2Result && f2Result.data && f2Result.data.slot) || null
         },
         error: null
     };
@@ -1248,7 +1282,7 @@ export async function _resolveStaffForSlotInternal({
 
 export const resolveStaffForSlot = webMethod(
     Permissions.Anyone,
-    async (serviceIdOrSlug, start, resourceId, addOnIds = [], end = null) => {
+    async function (serviceIdOrSlug, start, resourceId, addOnIds, end) {
         try {
             const resolved = await _resolveServiceIdInternal(serviceIdOrSlug);
             if (!resolved) {
@@ -1261,11 +1295,11 @@ export const resolveStaffForSlot = webMethod(
             return await _resolveStaffForSlotInternal({
                 serviceId: resolved,
                 f1Start: start,
-                f1End: end,
+                f1End: end || null,
                 f2Start: null,
                 f2End: null,
                 requestedResourceId: resourceId,
-                addOnIds,
+                addOnIds: Array.isArray(addOnIds) ? addOnIds : [],
                 traceId: makeTraceId("staff-resolve-wm")
             });
         } catch (error) {
@@ -1288,7 +1322,7 @@ export async function _invalidateCachesInternal(serviceId, dateYmd, resourceId, 
             serviceCatalogRAM.delete(sid);
         }
         log.info("_invalidateCachesInternal", {
-            traceId,
+            traceId: traceId,
             serviceId: sid || null,
             dateYmd: _safeTrim(dateYmd) || null,
             resourceId: _safeTrim(resourceId) || null
@@ -1296,30 +1330,24 @@ export async function _invalidateCachesInternal(serviceId, dateYmd, resourceId, 
         return { status: "SUCCESS" };
     } catch (error) {
         log.warn("_invalidateCachesInternal failed", {
-            traceId,
-            message: error?.message
+            traceId: traceId,
+            message: error && error.message
         });
-        return { status: "ERROR", error: error?.message || "UNKNOWN" };
+        return { status: "ERROR", error: (error && error.message) || "UNKNOWN" };
     }
 }
 
 // ============================================================================
 // REVALIDACION EXACTA
 // ============================================================================
-export async function revalidateExactAvailabilitySlot({
-    serviceId,
-    localStartDate,
-    localEndDate,
-    resourceId,
-    nativeAddonIds = [],
-    traceId
-}) {
-    const activeTraceId = traceId || makeTraceId("exact-slot");
-    const resolvedServiceId = await _resolveServiceIdInternal(serviceId);
-    const start = _normalizeLocalIsoStr(localStartDate);
-    const end = _normalizeLocalIsoStr(localEndDate);
-    const rawResourceId = _safeTrim(resourceId);
+export async function revalidateExactAvailabilitySlot(params) {
+    const activeTraceId = params.traceId || makeTraceId("exact-slot");
+    const resolvedServiceId = await _resolveServiceIdInternal(params.serviceId);
+    const start = _normalizeLocalIsoStr(params.localStartDate);
+    const end = _normalizeLocalIsoStr(params.localEndDate);
+    const rawResourceId = _safeTrim(params.resourceId);
     const requiredResourceId = _looksLikeGuid(rawResourceId) ? rawResourceId : "";
+    
     if (!resolvedServiceId || !start || !end || !_isValidSlotRange(start, end)) {
         return {
             status: "ERROR",
@@ -1327,22 +1355,20 @@ export async function revalidateExactAvailabilitySlot({
             error: { code: "INVALID_SLOT_RECHECK", message: "Selected slot data is invalid." }
         };
     }
+    
     try {
-        const normalizedAddonIds = Array.from(
-            new Set(
-                (Array.isArray(nativeAddonIds) ? nativeAddonIds : [])
-                    .map((id) => _safeTrim(id))
-                    .filter((id) => _looksLikeGuid(id))
-            )
-        ).sort();
-        const earlyServiceConfig = await _getServiceBySlugOrIdInternal(
-            resolvedServiceId,
-            activeTraceId
-        );
+        const normalizedAddonIds = Array.from(new Set(
+            (Array.isArray(params.nativeAddonIds) ? params.nativeAddonIds : [])
+                .map(function (id) { return _safeTrim(id); })
+                .filter(function (id) { return _looksLikeGuid(id); })
+        )).sort();
+        
+        const earlyServiceConfig = await _getServiceBySlugOrIdInternal(resolvedServiceId, activeTraceId);
         const serviceDurationRange =
-            earlyServiceConfig?.status === "SUCCESS" && earlyServiceConfig?.data?.durationRange
+            (earlyServiceConfig && earlyServiceConfig.status === "SUCCESS" && earlyServiceConfig.data && earlyServiceConfig.data.durationRange)
                 ? earlyServiceConfig.data.durationRange
                 : null;
+        
         if (normalizedAddonIds.length > 0 && serviceDurationRange) {
             return {
                 status: "ERROR",
@@ -1354,6 +1380,7 @@ export async function revalidateExactAvailabilitySlot({
                 }
             };
         }
+        
         let rawSlot = null;
         if (normalizedAddonIds.length > 0) {
             const listPayload = {
@@ -1372,23 +1399,22 @@ export async function revalidateExactAvailabilitySlot({
                 ];
             }
             const listed = await _executeWithRetry(
-                () =>
-                    withTimeout(
-                        () => availabilityTimeSlots.listAvailabilityTimeSlots(listPayload),
+                function () {
+                    return withTimeout(
+                        function () { return availabilityTimeSlots.listAvailabilityTimeSlots(listPayload); },
                         WATCHDOG_TIMEOUT_MS,
                         "exactSlot:list"
-                    ),
+                    );
+                },
                 2,
                 300
             );
-            rawSlot =
-                (Array.isArray(listed?.timeSlots) ? listed.timeSlots : []).find((slot) => {
-                    const slotStart = _normalizeLocalIsoStr(
-                        slot?.localStartDate || slot?.startDate
-                    );
-                    const slotEnd = _normalizeLocalIsoStr(slot?.localEndDate || slot?.endDate);
-                    return slotStart === start && slotEnd === end && slot?.bookable === true;
-                }) || null;
+            const listedSlots = Array.isArray(listed && listed.timeSlots) ? listed.timeSlots : [];
+            rawSlot = listedSlots.find(function (slot) {
+                const slotStart = _normalizeLocalIsoStr(slot && (slot.localStartDate || slot.startDate));
+                const slotEnd = _normalizeLocalIsoStr(slot && (slot.localEndDate || slot.endDate));
+                return slotStart === start && slotEnd === end && slot && slot.bookable === true;
+            }) || null;
         } else {
             const getPayload = {
                 serviceId: String(resolvedServiceId),
@@ -1403,23 +1429,25 @@ export async function revalidateExactAvailabilitySlot({
                 ];
             }
             const result = await _executeWithRetry(
-                () =>
-                    withTimeout(
-                        () => availabilityTimeSlots.getAvailabilityTimeSlot(getPayload),
+                function () {
+                    return withTimeout(
+                        function () { return availabilityTimeSlots.getAvailabilityTimeSlot(getPayload); },
                         WATCHDOG_TIMEOUT_MS,
                         "exactSlot:get"
-                    ),
+                    );
+                },
                 2,
                 300
             );
-            rawSlot = result?.timeSlot || null;
+            rawSlot = (result && result.timeSlot) || null;
         }
+        
         if (requiredResourceId) {
             const verification = await _verifyRequiredStaffViaGet({
                 serviceId: resolvedServiceId,
-                start,
-                end,
-                requiredResourceId,
+                start: start,
+                end: end,
+                requiredResourceId: requiredResourceId,
                 nativeAddonIds: normalizedAddonIds,
                 traceId: activeTraceId
             });
@@ -1445,18 +1473,11 @@ export async function revalidateExactAvailabilitySlot({
                 }
             };
         }
-        const normalizedSlot = _attachServiceId(
-            rawSlot,
-            resolvedServiceId,
-            activeTraceId,
-            "revalidateExactAvailabilitySlot"
-        );
+        
+        const normalizedSlot = _attachServiceId(rawSlot, resolvedServiceId, activeTraceId, "revalidateExactAvailabilitySlot");
         const availableResourceIds = _getResourceIdsFromSlot(normalizedSlot);
-        if (
-            !normalizedSlot ||
-            normalizedSlot.bookable !== true ||
-            availableResourceIds.length === 0
-        ) {
+        
+        if (!normalizedSlot || normalizedSlot.bookable !== true || availableResourceIds.length === 0) {
             return {
                 status: "ERROR",
                 data: null,
@@ -1466,7 +1487,7 @@ export async function revalidateExactAvailabilitySlot({
                 }
             };
         }
-        if (requiredResourceId && !availableResourceIds.includes(requiredResourceId)) {
+        if (requiredResourceId && availableResourceIds.indexOf(requiredResourceId) < 0) {
             return {
                 status: "ERROR",
                 data: null,
@@ -1476,16 +1497,16 @@ export async function revalidateExactAvailabilitySlot({
                 }
             };
         }
-        if (earlyServiceConfig?.status === "SUCCESS" && earlyServiceConfig?.data) {
+        
+        if (earlyServiceConfig && earlyServiceConfig.status === "SUCCESS" && earlyServiceConfig.data) {
             const config = earlyServiceConfig.data;
             const startUtc = getUtcDateFromMadridLocal(start);
             const endUtc = getUtcDateFromMadridLocal(end);
             const actualMinutes = _minutesBetweenUtcDates(startUtc, endUtc);
             const durationRange = config.durationRange;
             if (durationRange && actualMinutes > 0) {
-                const { min, max } = durationRange;
-                const belowMin = min > 0 && actualMinutes < min;
-                const aboveMax = max !== Infinity && actualMinutes > max;
+                const belowMin = durationRange.min > 0 && actualMinutes < durationRange.min;
+                const aboveMax = durationRange.max !== Infinity && actualMinutes > durationRange.max;
                 if (belowMin || aboveMax) {
                     return {
                         status: "ERROR",
@@ -1514,28 +1535,25 @@ export async function revalidateExactAvailabilitySlot({
                 }
             }
         }
+        
         let balancedResourceId = requiredResourceId || null;
         if (!balancedResourceId && availableResourceIds.length === 1) {
             balancedResourceId = availableResourceIds[0];
         } else if (!balancedResourceId && availableResourceIds.length > 1) {
             const dayKey = _safeTrim(start).slice(0, 10);
-            const loadMap = await _countStaffLoadForDay(
-                dayKey,
-                availableResourceIds,
-                activeTraceId
-            );
+            const loadMap = await _countStaffLoadForDay(dayKey, availableResourceIds, activeTraceId);
             balancedResourceId =
                 pickStaffByLowestLoad(availableResourceIds, loadMap) ||
                 availableResourceIds.slice().sort()[0];
         }
+        
         return {
             status: "SUCCESS",
             data: {
-                slot: {
-                    ...normalizedSlot,
+                slot: Object.assign({}, normalizedSlot, {
                     localStartDate: start,
                     localEndDate: end
-                },
+                }),
                 resourceId: balancedResourceId,
                 candidateResourceIds: availableResourceIds
             },
@@ -1545,9 +1563,9 @@ export async function revalidateExactAvailabilitySlot({
         log.warn("Exact slot revalidation failed", {
             traceId: activeTraceId,
             serviceId: String(resolvedServiceId),
-            start,
-            end,
-            message: error?.message
+            start: start,
+            end: end,
+            message: error && error.message
         });
         return {
             status: "ERROR",
