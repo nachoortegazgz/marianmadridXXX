@@ -250,6 +250,51 @@ async function handleSelection(payload, reply) {
     }
 }
 
+// AUDIT-BUG-01/02/05 (v11.6): lista blanca EXPLICITICA del payload de reserva.
+// Se prohibe deliberadamente propagar duration/price/professional/phases/payment
+// u otros campos internos desde el widget: la fuente de verdad es el contexto
+// resuelto en servidor (currentServiceId/currentSlug) y las revalidaciones de
+// executeBookingSaga. addOnIds queda solo como compatibilidad de entrada y se
+// normaliza al nombre canonico bookedAddOns.
+function normalizeBookedAddOns(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(_safeTrim).filter(Boolean).slice(0, 20);
+}
+
+function buildBookingRequestPayload(bookingData, fallbackTraceId) {
+    const slotF1 =
+        bookingData.slotF1 && typeof bookingData.slotF1 === "object"
+            ? bookingData.slotF1
+            : null;
+    const slotF2 =
+        bookingData.slotF2 && typeof bookingData.slotF2 === "object"
+            ? bookingData.slotF2
+            : null;
+
+    return {
+        serviceId: currentServiceId || bookingData.serviceId || null,
+        slug: currentSlug || bookingData.slug || null,
+        localStartDate: _safeTrim(bookingData.localStartDate || "") || null,
+        resourceId: _safeTrim(bookingData.resourceId || "") || null,
+        slotF1,
+        slotF2,
+        bookedAddOns: normalizeBookedAddOns(
+            bookingData.bookedAddOns || bookingData.addOnIds
+        ),
+        email: _safeTrim(bookingData.email || ""),
+        firstName: _safeTrim(bookingData.firstName || ""),
+        lastName: _safeTrim(bookingData.lastName || ""),
+        phone: _safeTrim(bookingData.phone || ""),
+        paymentMethod: _safeTrim(bookingData.paymentMethod || "") || null,
+        channelType: _safeTrim(bookingData.channelType || "") || null,
+        rgpdConsent: bookingData.rgpdConsent === true,
+        pairToken: _safeTrim(bookingData.pairToken || "") || null,
+        traceId: _safeTrim(fallbackTraceId || "") || makeTraceId("calendario-book")
+    };
+}
+
+let lastBookingMessageId = "";
+
 async function handleBooking(message, reply, traceId) {
     const payload = getPayload(message);
     const bookingData =
@@ -270,12 +315,28 @@ async function handleBooking(message, reply, traceId) {
         return;
     }
 
-    const requestPayload = {
-        ...bookingData,
-        serviceId: bookingData.serviceId || currentServiceId,
-        slug: bookingData.slug || currentSlug,
-        traceId
-    };
+    // AUDIT-BUG-21: rechazo de replay local del mismo MM_BOOK dentro de la
+    // sesion. La idempotencia fuerte sigue viviendo en el backend
+    // (pairToken + transaction gate SAGA-PATCH-02); esto evita duplicados
+    // evidentes por doble clic o reintento automatico del widget.
+    const messageId = String(message?.messageId || "");
+    if (messageId && messageId === lastBookingMessageId) {
+        reply(
+            MESSAGE_TYPES.BOOK,
+            createResultError(
+                "DUPLICATE_REQUEST",
+                "La solicitud anterior sigue en curso. No repitas el envio."
+            ),
+            message
+        );
+        return;
+    }
+    lastBookingMessageId = messageId;
+
+    const requestPayload = buildBookingRequestPayload(
+        bookingData,
+        payload.traceId || traceId
+    );
 
     try {
         const result = await withTimeout(
@@ -291,7 +352,13 @@ async function handleBooking(message, reply, traceId) {
 
         reply(MESSAGE_TYPES.BOOK, bookingResult, message);
 
-        if (bookingResult.status === "SUCCESS") {
+        // AUDIT-BUG-12: el lightbox solo se abre si el backend confirma
+        // persistencia real (status SUCCESS + bookingId presente).
+        if (
+            bookingResult.status === "SUCCESS" &&
+            bookingResult.data &&
+            bookingResult.data.bookingId
+        ) {
             try {
                 await wixWindowFrontend.openLightbox(
                     "ConfirmacionReserva",

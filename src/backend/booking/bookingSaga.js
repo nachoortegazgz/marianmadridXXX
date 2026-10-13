@@ -580,9 +580,15 @@ async function _deleteCitasByPairToken(pairToken, traceId) {
 // BLOCK 11 - ADDONS (SAGA-04 + SAGA-PATCH-01/06)
 // =============================================================================
 function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
+    // AUDIT-BUG-01/18 (v11.6): bookedAddOns es el nombre canonico de entrada;
+    // addOnIds/nativeAddonIds quedan solo como compatibilidad legacy. La
+    // normalizacion ocurre una unica vez aqui y el resultado detectAddonIds
+    // se propaga identico a disponibilidad-reservacion-persistencia.
     const rawAddons =
+        (unsafePayload && unsafePayload.bookedAddOns) ||
         (unsafePayload && unsafePayload.nativeAddonIds) ||
         (unsafePayload && unsafePayload.addOnIds) ||
+        (metaCita && metaCita.bookedAddOns) ||
         (metaCita && metaCita.nativeAddonIds) ||
         (metaCita && metaCita.addOnIds) ||
         [];
@@ -779,6 +785,19 @@ export async function executeBookingSaga(unsafePayload) {
         if (!email) {
             throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Email is required", { traceId: traceId });
         }
+        // AUDIT-BUG-17/24 (v11.6): el consentimiento RGPD es requisito de
+        // negocio y LOPD/GDPR, no opcional. Se exige en servidor porque el
+        // payload del cliente nunca es fuente de verdad para permisos legales.
+        const rgpdConsent =
+            (unsafePayload && unsafePayload.rgpdConsent === true) ||
+            metaCita.rgpdConsent === true;
+        if (!rgpdConsent) {
+            throw createBookingError(
+                ERROR_CODES.INVALID_PAYLOAD,
+                "RGPD consent is required",
+                { traceId: traceId }
+            );
+        }
         const rawServiceId = _safeTrim((unsafePayload && unsafePayload.serviceId) || metaCita.serviceId || "");
         const serviceId = await _resolveServiceIdInternal(rawServiceId);
         if (!serviceId || !_looksLikeGuid(serviceId)) {
@@ -803,11 +822,39 @@ export async function executeBookingSaga(unsafePayload) {
         if (!f1LocalStart || !f1LocalEnd) {
             throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "F1 slot dates are required", { traceId: traceId });
         }
+        // AUDIT-BUG-19 (v11.6): rechazo de intervalos imposibles antes de
+        // bloquear locks. start < end por fase; solape F1/F2 se cubre en
+        // _validateDualGap (gap >= 0 y <= MAX). Duracion negativa o cero ->
+        // rechazo explicito. (v11.7 FIX: esta comprobacion se insertaba ANTES
+        // de definir f1LocalStart/f1LocalEnd -> ReferenceError en runtime.
+        // Movida a su posicion correcta, tras la normalizacion de fechas.)
+        const f1StartMs = Date.parse(f1LocalStart);
+        const f1EndMs = Date.parse(f1LocalEnd);
+        if (
+            Number.isNaN(f1StartMs) || Number.isNaN(f1EndMs) ||
+            !(f1EndMs > f1StartMs)
+        ) {
+            throw createBookingError(
+                ERROR_CODES.INVALID_DATES,
+                "F1 slot has invalid or non-positive duration",
+                { traceId: traceId }
+            );
+        }
         let f2LocalStart = "";
         let f2LocalEnd = "";
         if (isDual) {
             f2LocalStart = _normalizeLocalIsoStr(slotF2Input.localStartDate || slotF2Input.start || metaCita.f2Start);
             f2LocalEnd = _normalizeLocalIsoStr(slotF2Input.localEndDate || slotF2Input.end || metaCita.f2End);
+            // AUDIT-BUG-19 (v11.6): slotF2 incompleto en reserva dual es
+            // payload invalido; no se permite derivar silenciosamente sin
+            // al menos la fecha de inicio.
+            if (!f2LocalStart && !f2LocalEnd) {
+                throw createBookingError(
+                    ERROR_CODES.INVALID_PAYLOAD,
+                    "Dual booking requires F2 slot dates",
+                    { traceId: traceId }
+                );
+            }
             const linkedValidation = await _validateLinkedPhaseService(linkedPhases, parentLocationId, traceId);
             if (!f2LocalStart) {
                 const f1EndUtc = getUtcDateFromMadridLocal(f1LocalEnd);

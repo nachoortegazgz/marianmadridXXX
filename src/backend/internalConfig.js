@@ -398,6 +398,38 @@ export const RECORD_TYPE_HORARIOS = Object.freeze({
     AJUSTE: "AJUSTE"
 });
 
+/**
+ * IC-13 (v11.6): origen de la trazabilidad del fichaje (quien lo registro).
+ * Consumidor: horario.web.js (registrarFichaje=SELF, registrarAjusteHorario=MANAGER).
+ */
+export const CLOCK_REGISTERED_BY = Object.freeze({
+    SELF: "SELF",
+    MANAGER: "MANAGER"
+});
+
+/**
+ * IC-13 (v11.6): campos fisicos de RegistrosHorariosStaff (cms.v8.1-FINAL).
+ * Unica referencia SSOT; sustituye a literales dispersos en el writer.
+ */
+export const REGISTROS_HORARIOS_FIELDS = Object.freeze({
+    RESOURCE_ID: "resourceId",
+    MEMBER_ID: "memberId",
+    STAFF_NAME: "staffName",
+    RECORDED_AT: "recordedAt",
+    RECORDED_TIME: "recordedTime",
+    DAY_KEY: "dayKey",
+    MONTH_KEY: "monthKey",
+    CLOCK_EVENT_TYPE: "clockEventType",
+    RECORD_TYPE: "recordType",
+    REGISTERED_BY: "registeredBy",
+    REGISTERED_BY_MEMBER_ID: "registeredByMemberId",
+    ADJUSTMENT_REASON: "adjustmentReason",
+    DEVICE_IP_ADDRESS: "deviceIpAddress",
+    META: "meta",
+    TRACE_ID: "traceId",
+    SIGNATURE: "signature"
+});
+
 export const INVENTORY_MOVEMENT_TYPE = Object.freeze({
     VENTA: "VENTA",
     DEVOLUCION: "DEVOLUCION",
