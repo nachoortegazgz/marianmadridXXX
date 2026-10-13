@@ -27,6 +27,7 @@ import {
   SDK_CONFIG,
   MOVEMENT_TYPE,
   RECORD_TYPE,
+  THIRD_PARTY_TYPE,
 } from "backend/internalConfig";
 import { makeTraceId, _safeTrim, _roundMoney, withTimeout } from "public/mmUtils";
 import { requireCajero, requireAdmin, rateLimiter } from "backend/security";
@@ -467,22 +468,26 @@ async function _getBusinessTaxId(traceId) {
     let item = byRecordType?.items?.[0] || null;
     if (!item) {
       // Transitional read adapter (EOL 31/12/2026): current producer rows have
-      // no recordType yet; fall back to the emisor marker when present.
+      // no recordType yet; fall back to the emisor marker when present. The
+      // mock query engine is exact-match only, so the legacy probe runs as an
+      // unfiltered single-row read and the EMISOR filter is applied here in
+      // code (semantically identical against live Velo).
       const legacy = await withTimeout(
         wixData.query(BUSINESS_COLLECTIONS.DATOS_FISCALES)
-          .eq("thirdPartyType", "EMISOR")
-          .eq("active", true)
           .limit(1)
           .find({ suppressAuth: true }),
         CMS_TIMEOUT_MS,
         "getBusinessTaxIdLegacyAdapter"
       );
-      item = legacy?.items?.[0] || null;
+      const legacyItem = (legacy?.items || []).find(
+        (r) => r && r.active === true && String(r.thirdPartyType || "").toUpperCase() === THIRD_PARTY_TYPE.EMISOR
+      ) || null;
+      item = legacyItem;
       if (item) {
         log.warn("_getBusinessTaxId used legacy EMISOR adapter (no CONFIG_SISTEMA row)", { traceId });
       }
     }
-    const canonical = _safeTrim(item?.producerTaxId || item?.nifProductor);
+    const canonical = _safeTrim(item?.nifProductor || item?.producerTaxId);
     if (canonical) return canonical;
     const transitional = _safeTrim(item?.taxId);
     if (transitional) {

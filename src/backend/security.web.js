@@ -37,7 +37,7 @@ import {
     isStaffCollaborator,
 } from "backend/security";
 
-import { STAFF_ACCESS } from "backend/internalConfig";
+import { STAFF_ACCESS, DATOS_FISCALES_FIELDS, RECORD_TYPE, BUSINESS_COLLECTIONS } from "backend/internalConfig";
 
 import {
     successResponse,
@@ -115,8 +115,9 @@ export const checkCajeroAccess = webMethod(
 // BLOQUE 4 - CHECK STAFF COLLABORATOR ACCESS (CONTRATO ADMINISTRACION)
 // Devuelve { isMarianManager, isAdmin, isCajero }.
 // isMarianManager: miembro autenticado cuyo email esta dado de alta
-// en MapaStaff con resourceId = STAFF_ACCESS.MARIAN_RESOURCE_ID y rol ADMIN
-// (identidad Marian). Fail-closed: cualquier duda deniega.
+// en DatosFiscales(recordType=STAFF_CONFIG) con bookingsResourceId =
+// STAFF_ACCESS.MARIAN_RESOURCE_ID (identidad Marian). Fail-closed:
+// cualquier duda deniega. IC-10: MapaStaff suprimida -> DatosFiscales.
 // =============================================================================
 
 async function _isMarianManagerIdentity(traceId) {
@@ -132,9 +133,10 @@ async function _isMarianManagerIdentity(traceId) {
         }
 
         const res = await wixData
-            .query("MapaStaff")
-            .eq("email", email)
-            .eq("resourceId", STAFF_ACCESS.MARIAN_RESOURCE_ID)
+            .query(BUSINESS_COLLECTIONS.DATOS_FISCALES)
+            .eq(DATOS_FISCALES_FIELDS.RECORD_TYPE, RECORD_TYPE.STAFF_CONFIG)
+            .eq(DATOS_FISCALES_FIELDS.EMAIL, email)
+            .eq(DATOS_FISCALES_FIELDS.BOOKINGS_RESOURCE_ID, STAFF_ACCESS.MARIAN_RESOURCE_ID)
             .limit(1)
             .find({ suppressAuth: true });
 

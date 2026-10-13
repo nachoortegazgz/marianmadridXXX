@@ -28,7 +28,8 @@ import {
     SDK_CONFIG,
     ROL_WEBSITE,
     STAFF_ACCESS,
-    MAPA_STAFF_FIELDS,
+    DATOS_FISCALES_FIELDS,
+    RECORD_TYPE,
 } from "backend/internalConfig";
 
 import { makeTraceId } from "public/mmUtils";
@@ -128,8 +129,29 @@ function _createAccessDeniedError(requiredRole) {
 }
 
 // =============================================================================
-// BLOQUE 3 - RESOLUCION DE STAFF (BUG-01 FIX: sin .eq("active"), usa memberId)
+// BLOQUE 3 - RESOLUCION DE STAFF (IC-10: MapaStaff suprimida -> DatosFiscales)
+// Fuente: filas DatosFiscales con recordType=STAFF_CONFIG (migracion IC-08).
+// C-02: rolWebsite se lee del campo fisico websiteRole.
 // =============================================================================
+
+/**
+ * IC-10: adaptador de lectura. Proyecta una fila DatosFiscales(STAFF_CONFIG)
+ * a la forma logica que consumen los verificadores de rol de este modulo
+ * (rolWebsite / memberId / resourceId / email). Sin fila -> null (fail-closed).
+ */
+function _mapStaffConfigToLegacyShape(row) {
+    if (!row || typeof row !== "object") return null;
+    return {
+        _id: row._id,
+        memberId: row[DATOS_FISCALES_FIELDS.WIX_MEMBER_ID],
+        resourceId: row[DATOS_FISCALES_FIELDS.BOOKINGS_RESOURCE_ID],
+        email: row[DATOS_FISCALES_FIELDS.EMAIL],
+        rolWebsite: String(row[DATOS_FISCALES_FIELDS.WEBSITE_ROLE] || "")
+            .trim().toUpperCase(),
+        staffName: row[DATOS_FISCALES_FIELDS.COMMERCIAL_NAME] ||
+            row[DATOS_FISCALES_FIELDS.LEGAL_NAME],
+    };
+}
 
 async function _queryStaffByEmail(email, traceId) {
     const normalizedEmail = _safeString(email).toLowerCase();
@@ -139,12 +161,13 @@ async function _queryStaffByEmail(email, traceId) {
         // C-01: eliminado .eq("active", true). El ciclo de vida se gestiona
         // por ausencia de registro o por rolWebsite.
         const result = await wixData
-            .query(BUSINESS_COLLECTIONS.MAPA_STAFF)
-            .eq(MAPA_STAFF_FIELDS.EMAIL, normalizedEmail)
+            .query(BUSINESS_COLLECTIONS.DATOS_FISCALES)
+            .eq(DATOS_FISCALES_FIELDS.RECORD_TYPE, RECORD_TYPE.STAFF_CONFIG)
+            .eq(DATOS_FISCALES_FIELDS.EMAIL, normalizedEmail)
             .limit(1)
             .find({ suppressAuth: true });
 
-        return result?.items?.[0] || null;
+        return _mapStaffConfigToLegacyShape(result?.items?.[0]);
     } catch (error) {
         log.error("Staff lookup by email failed", {
             traceId,
@@ -161,12 +184,13 @@ async function _queryStaffByMemberId(memberId, traceId) {
     try {
         // C-03: resolucion por memberId (antes staffMemberId)
         const result = await wixData
-            .query(BUSINESS_COLLECTIONS.MAPA_STAFF)
-            .eq(MAPA_STAFF_FIELDS.MEMBER_ID, normalizedMemberId)
+            .query(BUSINESS_COLLECTIONS.DATOS_FISCALES)
+            .eq(DATOS_FISCALES_FIELDS.RECORD_TYPE, RECORD_TYPE.STAFF_CONFIG)
+            .eq(DATOS_FISCALES_FIELDS.WIX_MEMBER_ID, normalizedMemberId)
             .limit(1)
             .find({ suppressAuth: true });
 
-        return result?.items?.[0] || null;
+        return _mapStaffConfigToLegacyShape(result?.items?.[0]);
     } catch (error) {
         log.error("Staff lookup by memberId failed", {
             traceId,

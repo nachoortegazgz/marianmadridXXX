@@ -1,8 +1,9 @@
 /*
 =============================================================================
 SUITE: unit.ssot.v5011 (node --test, offline via loader.mjs mocks)
-Purpose: 14 assertions-equivalent tests replacing the legacy mocha-style
-unit.testRunner battery, WITHOUT weakening any assertion. Covers:
+Purpose: 14 assertions-equivalent tests; canonical unit battery (the legacy
+mocha-style runner it replaced was removed as dead code in this cleanup),
+WITHOUT weakening any assertion. Covers:
 pairToken determinism, slotKey format, date conversion, booking enums,
 fiscal enums, accounting enums, collections defined, sdk config,
 CitasF2 no-legacy payload, plus SSOT additions (EU VAT prefixes,
@@ -114,7 +115,7 @@ test('UNIT-STRUCT-01 collections SSOT defined', () => {
   // FASE3: DUAL_SLOT_CACHE fue absorbida por ControlOperativo (8-en-1, ADR-05);
   // la exigencia canonica es CONTROL_OPERATIVO presente en ambos grupos.
   const requiredCollections = [
-    'SERVICIOS_CATALOGO', 'MAPA_STAFF', 'CITAS_F2',
+    'SERVICIOS_CATALOGO', 'DATOS_FISCALES', 'CITAS_F2',
     'CONTROL_OPERATIVO', 'MOVIMIENTOS_CAJA', 'HISTORICO_CIERRES_Z',
     'REGISTROS_HORARIOS_STAFF',
   ];

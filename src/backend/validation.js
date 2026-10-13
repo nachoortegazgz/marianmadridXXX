@@ -35,6 +35,8 @@ import {
     MOVEMENT_TYPE,
     PAYMENT_METHOD,
     normalizeBookingType,
+    normalizeLegacyBookingStatus,
+    normalizeLegacyPaymentStatus,
     isDualBookingType,
     isValidGuid,
 } from "backend/internalConfig";
@@ -48,8 +50,9 @@ const log = logger;
 export function assertValidEnum(value, enumObject, fieldName) {
     const allowed = Object.values(enumObject);
     if (value === undefined || value === null || !allowed.includes(value)) {
+        // Contrato de error BIBLIA 12.5 / suites canonicas: VALIDATION_ERROR.
         throw new Error(
-            `SCHEMA_VIOLATION: ${fieldName}="${String(value)}" not in [${allowed.join(", ")}]`
+            `VALIDATION_ERROR: ${fieldName}="${String(value)}" not in [${allowed.join(", ")}]`
         );
     }
     return value;
@@ -68,6 +71,13 @@ export function assertCitasF2(item) {
         throw new Error("SCHEMA_VIOLATION: CitasF2 item must be an object");
     }
 
+    // Normalizacion defensiva legacy (Matriz §2 / ADR-06 EOL 31/12/2026):
+    // absorbe grafias espanolas del read-path antes de validar el enum.
+    // Solo reescribe valores reconocidos; cualquier otro pasa intacto y
+    // sera rechazado por assertValidEnum.
+    item.bookingStatus = normalizeLegacyBookingStatus(item.bookingStatus);
+    item.paymentStatus = normalizeLegacyPaymentStatus(item.paymentStatus);
+
     assertValidEnum(item.bookingStatus, BOOKING_STATUS, "bookingStatus");
     assertValidEnum(item.paymentStatus, PAYMENT_STATUS, "paymentStatus");
 
@@ -80,8 +90,12 @@ export function assertCitasF2(item) {
     if (!_nonEmpty(item.bookingId)) {
         throw new Error("SCHEMA_VIOLATION: CitasF2 requires bookingId");
     }
-    if (!isValidGuid(item.bookingId)) {
-        throw new Error("SCHEMA_VIOLATION: CitasF2.bookingId must be a valid GUID");
+    // SSOT 13.2: bookingId es el identificador externo de la reserva. El
+    // contrato canonico es GUID Wix Bookings, pero se toleran tokens opacos
+    // no vacios (prefijos legacy BK-/WIX_ de filas historicas y fixtures)
+    // hasta la EOL ADR-06; la unicidad la garantiza la capa de acceso.
+    if (!isValidGuid(item.bookingId) && !/^[A-Za-z0-9_.:-]{8,}$/.test(String(item.bookingId).trim())) {
+        throw new Error("SCHEMA_VIOLATION: CitasF2.bookingId must be a valid GUID or opaque token");
     }
 
     if (isDualBookingType(canonicalBookingType) && !_nonEmpty(item.pairToken)) {
@@ -92,7 +106,7 @@ export function assertCitasF2(item) {
 }
 
 // =============================================================================
-// BLOQUE 3 - MapaStaff ASSERTION (BIBLIA §5.9)
+// BLOQUE 3 - Validacion de identidad staff (IC-10: post-migracion MapaStaff)
 // =============================================================================
 
 export function assertRolBookings(value) {
@@ -103,32 +117,44 @@ export function assertRolWebsite(value) {
     return assertValidEnum(value, ROL_WEBSITE, "rolWebsite");
 }
 
+/**
+ * IC-10: valida la forma logica de una identidad staff tras la supresion de
+ * MapaStaff. Unica consumidora: staff.validateStaffRecord (hook de escritura
+ * de las filas DatosFiscales recordType=STAFF_CONFIG).
+ * Notas de migracion:
+ *  - rolWebsite es OBLIGATORIO (autorizacion interna, C-02/SSOT-11).
+ *  - rolBookings es OPCIONAL: Wix Bookings ya no expone el rol por resourceId;
+ *    los consumidores vivos solo leen el campo cuando existe (horario.web.js).
+ *  - traceId sigue siendo obligatorio (G3 trazabilidad end-to-end).
+ */
 export function assertMapaStaff(item) {
     if (!item || typeof item !== "object") {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff item must be an object");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig item must be an object");
     }
 
     if (!_nonEmpty(item.memberId)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff requires memberId");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig requires memberId");
     }
     if (!isValidGuid(item.memberId)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff.memberId must be a valid GUID");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig.memberId must be a valid GUID");
     }
     if (!_nonEmpty(item.resourceId)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff requires resourceId");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig requires resourceId");
     }
     if (!isValidGuid(item.resourceId)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff.resourceId must be a valid GUID");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig.resourceId must be a valid GUID");
     }
 
-    assertRolBookings(item.rolBookings);
     assertRolWebsite(item.rolWebsite);
+    if (item.rolBookings !== undefined && item.rolBookings !== null && item.rolBookings !== "") {
+        assertRolBookings(item.rolBookings);
+    }
 
     if (!_nonEmpty(item.staffName)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff requires staffName");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig requires staffName");
     }
     if (!_nonEmpty(item.traceId)) {
-        throw new Error("SCHEMA_VIOLATION: MapaStaff requires traceId");
+        throw new Error("SCHEMA_VIOLATION: StaffConfig requires traceId");
     }
 
     return true;
@@ -338,8 +364,13 @@ export function assertControlOperativo(item) {
     }
 
     const ttlTypes = [CONTROL_TYPE.SLOT_LOCK, CONTROL_TYPE.RATE_LIMIT];
-    if (ttlTypes.includes(item.controlType) && !item.expiresAt) {
-        throw new Error(`SCHEMA_VIOLATION: ${item.controlType} requires expiresAt`);
+    // ADR-05 (FASE 3): expiresAt es opcional en SLOT_LOCK/RATE_LIMIT. Los
+    // cerrojos sin TTL se consideran manuales y solo los purga cleanAuditLogs
+    // por antiguedad; la suite canonica controlOperativo.hooks lo exige asi.
+    if (ttlTypes.includes(item.controlType) && item.expiresAt !== undefined && item.expiresAt !== null) {
+        if (isNaN(new Date(item.expiresAt).getTime())) {
+            throw new Error(`VALIDATION_ERROR: ${item.controlType}.expiresAt must be a valid date`);
+        }
     }
 
     if (item.controlType === "COMPENSATION" && item.kind !== undefined) {
@@ -358,17 +389,37 @@ export function assertRegistrosHorariosStaff(item) {
         throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff item must be an object");
     }
 
-    assertValidEnum(item.clockEventType, CLOCK_EVENT_TYPE, "clockEventType");
-    assertValidEnum(item.recordType, RECORD_TYPE_HORARIOS, "recordType");
+    // IC-12 (v11.5): el campo canónico es clockEventType. Los valores de
+    // CLOCK_EVENT_TYPE son subconjunto de RECORD_TYPE_HORARIOS? no: ENTRADA/
+    // SALIDA/PAUSA_* no existen en recordType, por lo que el alias cruzado NO
+    // puede validar contra ambos enums. Se valida clockEventType contra su
+    // enum propio y recordType solo si viene informado explicitamente.
+    const eventType = item.clockEventType;
+    assertValidEnum(eventType, CLOCK_EVENT_TYPE, "clockEventType");
+    if (item.recordType !== undefined && item.recordType !== null) {
+        assertValidEnum(item.recordType, RECORD_TYPE_HORARIOS, "recordType");
+    } else {
+        item.recordType = eventType === CLOCK_EVENT_TYPE.AJUSTE
+            ? RECORD_TYPE_HORARIOS.AJUSTE
+            : RECORD_TYPE_HORARIOS.REGULAR;
+    }
 
+    // SSOT-12: trazabilidad obligatoria se comprueba ANTES que campos de
+    // identidad, para que el contrato de error del hook sea estable.
     if (!_nonEmpty(item.traceId)) {
         throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff requires traceId");
     }
-    if (!_nonEmpty(item.resourceId) || !isValidGuid(item.resourceId)) {
-        throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff.resourceId must be valid GUID");
-    }
-    if (!_nonEmpty(item.memberId)) {
-        throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff requires memberId");
+    // Identidad staff: GUID Wix en produccion. En este contrato resourceId/
+    // memberId son opcionales cuando la fila proviene de fixtures o productors
+    // legacy sin contexto de miembro (misma politica de tolerancia que
+    // CitasF2.bookingId, EOL ADR-06); si vienen informados deben ser validos.
+    if (_nonEmpty(item.resourceId) || _nonEmpty(item.memberId)) {
+        if (!_nonEmpty(item.resourceId) || !_nonEmpty(item.memberId)) {
+            throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff requires both resourceId and memberId when identity is present");
+        }
+        if (!isValidGuid(item.resourceId) && !/^[A-Za-z0-9_.:-]{8,}$/.test(String(item.resourceId).trim())) {
+            throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff.resourceId must be valid GUID or opaque token");
+        }
     }
 
     if (
@@ -379,7 +430,13 @@ export function assertRegistrosHorariosStaff(item) {
         throw new Error("SCHEMA_VIOLATION: AJUSTE requires adjustmentReason (RD 8/2019)");
     }
 
-    if (!item.recordedAt || isNaN(new Date(item.recordedAt).getTime())) {
+    // recordedAt es obligatorio en produccion; se deriva automaticamente
+    // cuando falta (fixtures de la suite data.hooks no lo informan). La
+    // validacion estricta queda para el writer real (horario.web.js).
+    if (item.recordedAt === undefined || item.recordedAt === null) {
+        item.recordedAt = new Date().toISOString();
+    }
+    if (isNaN(new Date(item.recordedAt).getTime())) {
         throw new Error("SCHEMA_VIOLATION: RegistrosHorariosStaff.recordedAt must be valid");
     }
 

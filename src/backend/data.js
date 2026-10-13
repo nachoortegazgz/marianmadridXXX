@@ -57,7 +57,8 @@ export function MovimientosCaja_beforeInsert(item) {
     if (!item || typeof item !== "object") return item;
 
     if (!safeTrim(item.traceId)) {
-        schemaError("MovimientosCaja requires traceId");
+        // Contrato de error de la suite canonica data.hooks (HOOK-CAJA-01).
+        schemaError("MovimientosCaja: traceId obligatorio");
     }
     if (safeTrim(item.schemaVersion) !== LEDGER_SCHEMA_VERSION) {
         schemaError(`schemaVersion must be ${LEDGER_SCHEMA_VERSION}`);
@@ -86,7 +87,7 @@ export function MovimientosCaja_beforeUpdate() {
 }
 
 export function MovimientosCaja_beforeRemove() {
-    fiscalError("MovimientosCaja: deletion forbidden (Ley 11/2021).");
+    fiscalError("MovimientosCaja: Borrado prohibido (Ley 11/2021).");
 }
 
 // =============================================================================
@@ -130,7 +131,7 @@ export function HistoricoCierresZ_beforeUpdate(item, context) {
 }
 
 export function HistoricoCierresZ_beforeRemove() {
-    fiscalError("HistoricoCierresZ: deletion forbidden.");
+    fiscalError("HistoricoCierresZ: Borrado prohibido.");
 }
 
 // =============================================================================
@@ -148,7 +149,7 @@ export function RegistrosHorariosStaff_beforeUpdate() {
 }
 
 export function RegistrosHorariosStaff_beforeRemove() {
-    fiscalError("RegistrosHorariosStaff: deletion forbidden (RD 8/2019).");
+    fiscalError("RegistrosHorariosStaff: Borrado prohibido (RD 8/2019).");
 }
 
 // =============================================================================
@@ -207,7 +208,7 @@ export function LibroAsientosContablesDetalle_beforeUpdate() {
 }
 
 export function LibroAsientosContablesDetalle_beforeRemove() {
-    fiscalError("LibroAsientosContablesDetalle: deletion forbidden.");
+    fiscalError("LibroAsientosContablesDetalle: Borrado prohibido.");
 }
 
 // =============================================================================
@@ -262,7 +263,7 @@ export function MovimientosInventario_beforeUpdate() {
 }
 
 export function MovimientosInventario_beforeRemove() {
-    fiscalError("MovimientosInventario: deletion forbidden.");
+    fiscalError("MovimientosInventario: Borrado prohibido.");
 }
 
 // =============================================================================
@@ -285,7 +286,7 @@ export function ControlOperativo_beforeUpdate(item, context) {
 
 export function ControlOperativo_beforeRemove(item) {
     if (safeTrim(item?.controlType) === CONTROL_TYPE.WEBHOOK_EVENT) {
-        fiscalError("WEBHOOK_EVENT: deletion forbidden.");
+        fiscalError("WEBHOOK_EVENT: Borrado prohibido.");
     }
     return item;
 }

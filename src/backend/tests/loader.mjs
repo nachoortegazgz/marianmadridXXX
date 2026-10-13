@@ -72,7 +72,9 @@ export const wixDataMock = {
         else if (f[0] === '<=') { items = items.filter((it) => cmpValue(it[f[1]]) <= cmpValue(f[2])); }
         else if (f[0] === '>=') { items = items.filter((it) => cmpValue(it[f[1]]) >= cmpValue(f[2])); }
         else if (f[0] === 'range') { items = items.filter((it) => cmpValue(it[f[1]]) >= cmpValue(f[2]) && cmpValue(it[f[1]]) <= cmpValue(f[3])); }
-        else if (f[0] === 'has') { items = items.filter((it) => Array.isArray(it[f[1]]) && it[f[1]].includes(f[2])); }
+        // Velo "contains" = substring match on text fields; the mock must
+        // honor both string substrings and array membership to mirror prod.
+        else if (f[0] === 'has') { items = items.filter((it) => { const v = it[f[1]]; return typeof v === 'string' ? v.includes(f[2]) : Array.isArray(v) && v.includes(f[2]); }); }
         else if (f[0] === 'some') { items = items.filter((it) => Array.isArray(it[f[1]]) && it[f[1]].some((v) => f[2].includes(v))); }
         else if (Array.isArray(f[1])) { items = items.filter((it) => f[1].includes(it[f[0]])); }
         else { items = items.filter((it) => it[f[0]] === f[1]); }
@@ -199,6 +201,15 @@ export async function resolve(specifier, context, nextResolve) {
     // Offline harness: every Wix SDK package resolves to the generic stub.
     // wix-data keeps its dedicated in-memory mock below.
     return { url: 'mock:' + specifier, shortCircuit: true };
+  }
+  // Only the legacy adapter is redirected to the in-memory mock (it exposes
+  // the default wixData-style interface the mock implements).
+  // backend/dataAccess.js is REAL DAL code with named exports (CONSISTENCY,
+  // queryFirstItem, ...) that tests exercise directly; redirecting it broke
+  // every importer with "does not provide an export named 'CONSISTENCY'".
+  if (specifier === 'backend/dataLegacyAdapter' ||
+      specifier.endsWith('/dataLegacyAdapter.js')) {
+    return { url: 'mock:wix-data', shortCircuit: true };
   }
   if (specifier.startsWith('backend/') || specifier.startsWith('public/')) {
     const rel = specifier.includes('/') ? specifier.slice(specifier.indexOf('/') + 1) : specifier;

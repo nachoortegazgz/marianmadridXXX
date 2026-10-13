@@ -23,7 +23,8 @@ import {
     SDK_CONFIG,
     ROL_BOOKINGS,
     ROL_WEBSITE,
-    MAPA_STAFF_FIELDS,
+    DATOS_FISCALES_FIELDS,
+    RECORD_TYPE,
     STAFF_ACCESS,
 } from "backend/internalConfig";
 
@@ -104,24 +105,43 @@ export function invalidateStaffCache() {
 // BLOQUE 3 - CREACION DE REGISTRO DE STAFF (C-01/C-02/C-03)
 // =============================================================================
 
-function _createStaffRecord(item) {
+/**
+ * IC-10: proyecta una fila fisica DatosFiscales(recordType=STAFF_CONFIG) a la
+ * forma logica interna del catalogo de staff. MapaStaff fue suprimida (IC-08);
+ * los campos fisicos nuevos se mapean a los nombres logicos historicos para no
+ * tocar los resolvers/DTOs publicos. thirdPartyId/rolBookings/locationId/notes
+ * ya no tienen columna en DatosFiscales -> quedan "" (el DTO whitelist omite
+ * campos vacios, y los unicos consumidores vivos de esos campos son rutas de
+ * lectura tolerantes).
+ */
+function _mapStaffConfigRow(item) {
     if (!item || typeof item !== "object") return null;
+
+    const physicalRole = _normalizeText(
+        item[DATOS_FISCALES_FIELDS.WEBSITE_ROLE]
+    ).toUpperCase(); // C-02: websiteRole es el campo fisico post-migracion
 
     return {
         _id: _normalizeText(item._id),
-        resourceId: _normalizeText(item.resourceId),
-        memberId: _normalizeText(item.memberId), // C-03
-        rolBookings: _normalizeText(item.rolBookings).toUpperCase(), // C-02
-        rolWebsite: _normalizeText(item.rolWebsite).toUpperCase(), // C-02
-        staffName: _normalizeText(item.staffName),
-        displayName: _normalizeText(item.displayName),
+        resourceId: _normalizeText(item[DATOS_FISCALES_FIELDS.BOOKINGS_RESOURCE_ID]),
+        memberId: _normalizeText(item[DATOS_FISCALES_FIELDS.WIX_MEMBER_ID]), // C-03
+        rolBookings: _normalizeText(item.rolBookings).toUpperCase(), // legado opcional
+        rolWebsite: physicalRole, // C-02
+        staffName: _normalizeText(
+            item[DATOS_FISCALES_FIELDS.COMMERCIAL_NAME] ||
+            item[DATOS_FISCALES_FIELDS.LEGAL_NAME]
+        ),
+        displayName: _normalizeText(
+            item[DATOS_FISCALES_FIELDS.COMMERCIAL_NAME] ||
+            item[DATOS_FISCALES_FIELDS.LEGAL_NAME]
+        ),
         thirdPartyId: _normalizeText(item.thirdPartyId),
-        email: _normalizeEmail(item.email),
-        phone: _normalizeText(item.phone),
-        scheduleId: _normalizeText(item.scheduleId),
+        email: _normalizeEmail(item[DATOS_FISCALES_FIELDS.EMAIL]),
+        phone: _normalizeText(item[DATOS_FISCALES_FIELDS.PHONE]),
+        scheduleId: _normalizeText(item[DATOS_FISCALES_FIELDS.BOOKINGS_SCHEDULE_ID]),
         locationId: _normalizeText(item.locationId),
         location: _normalizeText(item.location),
-        notes: _normalizeText(item.notes),
+        notes: _normalizeText(item[DATOS_FISCALES_FIELDS.INTERNAL_NOTES]),
         traceId: _normalizeText(item.traceId),
         // C-01: campo 'active' NO se copia al registro interno
     };
@@ -151,13 +171,15 @@ async function _loadAllStaff(traceId) {
 
     try {
         const catalog = _emptyCatalog();
+        // IC-10: MapaStaff suprimida -> lectura de DatosFiscales(STAFF_CONFIG)
         const result = await wixData
-            .query(BUSINESS_COLLECTIONS.MAPA_STAFF)
+            .query(BUSINESS_COLLECTIONS.DATOS_FISCALES)
+            .eq(DATOS_FISCALES_FIELDS.RECORD_TYPE, RECORD_TYPE.STAFF_CONFIG)
             .limit(1000)
             .find({ suppressAuth: true });
 
         for (const item of result?.items || []) {
-            const record = _createStaffRecord(item);
+            const record = _mapStaffConfigRow(item);
             if (!record) continue;
             if (!record._id && !record.resourceId && !record.email) continue;
 
