@@ -502,7 +502,9 @@ export async function _mapServiceImport2ToUX(service, traceId) {
       return {
         id: resourceId,
         value: resourceId,
+        resourceId,
         name: displayName,
+        displayName,
         label: displayName
       };
     })
@@ -522,7 +524,7 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     sku,
     categoryId,
     locationId,
-    localizacion: location,
+    location,
     internalNotes,
     permitirCombinar: allowCombine,
     tiempoFase1: phase1Duration,
@@ -531,6 +533,7 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     duracionTotal: estimatedTotal,
     availableStaff,
     staffOptions,
+    price,
     depositAmount,
     depositType,
     onlinePayment,
