@@ -68,7 +68,7 @@ test('DTO-01 getConfirmedBookingForDisplay returns whitelisted DTO only', async 
 test('DTO-02 legacy status row readable via canonical projection', async () => {
   wixDataMock._reset();
   wixDataMock._seed(IC.BUSINESS_COLLECTIONS.CITAS_F2, [{
-    _id: 'r2', bookingId: 'BK-78', status: 'CONFIRMED', paymentStatus: 'PAID',
+    _id: 'r2', bookingId: 'BK-78', bookingStatus: 'CONFIRMED', paymentStatus: 'PAID',
     totalPrice: 30, internalNotes: 'x',
   }]);
   const res = await RW.getConfirmedBookingForDisplay({ bookingId: 'BK-78' });

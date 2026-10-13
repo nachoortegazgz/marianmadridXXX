@@ -280,13 +280,53 @@ export const CITAS_PAYMENT_STATUS = Object.freeze({
 /**
  * IC-09: valores obsoletos segun Matriz §2. Tolerados SOLO en lectura de filas
  * historicas de CitasF2 hasta EOL 31/12/2026 (ADR-06). Nunca se escriben.
+ * Incluye tanto las grafias espanolas legacy como los estados ingleses que ya
+ * no son canonicos del enum actual (PENDING_PAYMENT / CANCELLED).
  */
 export const LEGACY_BOOKING_STATUS_VALUES = Object.freeze([
     "CONFIRMADO",
     "CANCELADO",
     "REEMBOLSADO",
-    "PENDIENTE"
+    "PENDIENTE",
+    "PAGADO",
+    "PENDING_PAYMENT",
+    "CANCELLED"
 ]);
+
+/**
+ * Legacy de bookingStatus -> valor canonico BOOKING_STATUS (BIBLIA 12.2).
+ * Unico consumidor canonico: data.js CitasF2 hooks (normalizacion defensiva
+ * en escritura para absorber el read-path legado hasta la EOL ADR-06).
+ */
+export const LEGACY_TO_CANONICAL_BOOKING_STATUS = Object.freeze({
+    CONFIRMADO: "CONFIRMED",
+    PENDIENTE: "PENDING",
+    CANCELADO: "CANCELED",
+    REEMBOLSADO: "REFUNDED"
+});
+
+/**
+ * Legacy de paymentStatus -> valor canonico PAYMENT_STATUS.
+ */
+export const LEGACY_TO_CANONICAL_PAYMENT_STATUS = Object.freeze({
+    PAGADO: "PAID",
+    PENDIENTE: "PENDING_PAYMENT",
+    IMPAGADO: "NOT_PAID",
+    PARCIAL: "PARTIALLY_PAID",
+    REEMBOLSADO: "REFUNDED"
+});
+
+/** Normaliza bookingStatus legacy a canonico; devuelve el valor intacto si no aplica. */
+export function normalizeLegacyBookingStatus(value) {
+    const v = String(value === null || value === undefined ? "" : value).trim().toUpperCase();
+    return LEGACY_TO_CANONICAL_BOOKING_STATUS[v] || value;
+}
+
+/** Normaliza paymentStatus legacy a canonico; devuelve el valor intacto si no aplica. */
+export function normalizeLegacyPaymentStatus(value) {
+    const v = String(value === null || value === undefined ? "" : value).trim().toUpperCase();
+    return LEGACY_TO_CANONICAL_PAYMENT_STATUS[v] || value;
+}
 
 /**
  * IC-07: estados que no ocupan slot. Contiene CMS (CANCELLED, NO_SHOW) y nativos
@@ -345,6 +385,14 @@ export const CLOCK_EVENT_TYPE = Object.freeze({
     AJUSTE: "AJUSTE"
 });
 
+/**
+ * IC-12 (v11.3): alias canonico del enum de fichajes. Los consumidores (tests
+ * data.hooks, runners) referencian TIMECLOCK_TYPE; se exporta como unico
+ * segundo nombre permitido sobre el mismo objeto congelado (no es un alias de
+ * valores, es el handle canónico del contrato RegistrosHorariosStaff).
+ */
+export const TIMECLOCK_TYPE = CLOCK_EVENT_TYPE;
+
 export const RECORD_TYPE_HORARIOS = Object.freeze({
     REGULAR: "REGULAR",
     AJUSTE: "AJUSTE"
@@ -372,21 +420,113 @@ export const ROL_WEBSITE = Object.freeze({
     ESTILISTA: "ESTILISTA"
 });
 
-/** BIBLIA §6.3: exactamente 6 subtipos. Ampliar exige ADR + cambio en data.js. */
+/**
+ * BIBLIA 12 / ADR-05 (FASE3): ControlOperativo es la coleccion 8-en-1 que
+ * absorbe las 8 colecciones operativas suprimidas. Los 8 subtipos son el
+ * esquema objetivo del ADR. Las filas de infraestructura tecnica que no
+ * corresponden a ninguno de los 8 origenes historicos (flag de compensacion
+ * de la saga y doc de idempotencia de transaccion dual) se reclasifican:
+ *   - bookingSaga flag    -> COMPENSATION (procesado por runPendingCompensationsJob)
+ *   - bookingCore tx-doc  -> BOOKING_TX   (origen BookingTransactions)
+ */
 export const CONTROL_TYPE = Object.freeze({
     SLOT_LOCK: "SLOT_LOCK",
     WEBHOOK_EVENT: "WEBHOOK_EVENT",
-    DEDUPE_KEY: "DEDUPE_KEY",
-    IDEMPOTENCY: "IDEMPOTENCY",
     RATE_LIMIT: "RATE_LIMIT",
-    SYSTEM_FLAG: "SYSTEM_FLAG"
+    BOOKING_TX: "BOOKING_TX",
+    COMPENSATION: "COMPENSATION",
+    ALERT: "ALERT",
+    DAYS_CACHE: "DAYS_CACHE",
+    DUAL_CACHE: "DUAL_CACHE"
 });
 
+/**
+ * IC-10 (v11.2): contrato de acceso staff tras la supresion de MapaStaff.
+ * Definido aqui (no en Bloque 1) porque depende de ROL_WEBSITE (Bloque 10);
+ * en ESM los `const` del mismo modulo se evaluan en orden y referirlo antes
+ * de su inicializacion lanza ReferenceError (TDZ).
+ * MARIAN_RESOURCE_ID: resourceId Bookings de la identidad manager (STAFF.IDS[0],
+ * BIBLIA §4.2). ALLOWED_ROLES: roles de website con acceso a Zona Staff.
+ * Consumidores vivos: security.js isStaffCollaborator, staff.js isMarianResource,
+ * security.web.js _isMarianManagerIdentity. Datos leidos desde DatosFiscales
+ * (recordType=STAFF_CONFIG), NO desde la coleccion suprimida MapaStaff.
+ */
+export const STAFF_ACCESS = Object.freeze({
+    MARIAN_RESOURCE_ID: STAFF.IDS[0],
+    ALLOWED_ROLES: Object.freeze([ROL_WEBSITE.ADMIN, ROL_WEBSITE.GESTION])
+});
+
+/**
+ * Estados de ciclo de vida (BIBLIA 12 + ADR-05). Se listan SOLO valores con
+ * consumidor vivo verificado por grep; estados sin escritura no se exportan.
+ */
 export const CONTROL_STATUS = Object.freeze({
     ACTIVE: "ACTIVE",
+    OPEN: "OPEN",
+    PENDING: "PENDING",
+    PROCESSED: "PROCESSED",
     COMPLETED: "COMPLETED",
-    EXPIRED: "EXPIRED"
+    FAILED: "FAILED",
+    EXPIRED: "EXPIRED",
+    // ADR-05 / parity jobs.config: estados terminales consumidos por
+    // cleanAuditLogs (purga semanal 90d) y la bateria crons.jobsConfigParity.
+    EXECUTED: "EXECUTED",
+    CLOSED: "CLOSED"
 });
+
+/**
+ * IC-13 (v11.4): metadatos del sistema informatico emisor (Reglamento UE
+ * 2024/1173, Art. 9a). Unico consumidor vivo: eventLog._upsertDatosFiscales.
+ */
+export const COMPUTER_SYSTEM = Object.freeze({
+    softwareName: "Witio Booking Suite",
+    softwareVersion: "v5011-FISCAL",
+    computerSystemIdentifier: "WITIO-CMS-ES-01"
+});
+
+/**
+ * Estados de ciclo de vida del ledger de caja (MovimientosCaja / cierres).
+ * Consumidores vivos: eventLog.js, cajas.web.js y la bateria de tests.
+ */
+export const ENTRY_STATUS = Object.freeze({
+    DRAFT: "DRAFT",
+    POSTED: "POSTED",
+    LOCKED: "LOCKED"
+});
+
+/** Naturaleza PGC de una cuenta contable (Bloque contable, ADR-07). */
+export const ACCOUNT_NATURE = Object.freeze({
+    ACTIVO: "ACTIVO",
+    PASIVO: "PASIVO",
+    INGRESO: "INGRESO",
+    GASTO: "GASTO"
+});
+
+/**
+ * Cuentas PGC canonicas usadas por el libro de asientos. Unica referencia
+ * de codigos fisicos; los modulos nunca hardcodean numeros de cuenta.
+ */
+export const ACCOUNTING_ACCOUNT = Object.freeze({
+    CAJA: "572000",
+    INGRESOS_SERVICIOS: "705000",
+    IVA_REPERCUTIDO: "477000",
+    CLIENTES: "430000"
+});
+
+/** Tipos de factura AEAT (Veri*Factu). 8 valores del cuto 2.1.1. */
+export const TIPO_FACTURA = Object.freeze({
+    F1: "F1",
+    F2: "F2",
+    F3: "F3",
+    R1: "R1",
+    R2: "R2",
+    R3: "R3",
+    R4: "R4",
+    R5: "R5"
+});
+
+/** Tipos impositivos validos expresados en porcentaje entero (AEAT cuto). */
+export const IVA_RATES = Object.freeze([0, 4, 10, 21]);
 
 export const COMPENSATION_KIND = Object.freeze({
     CANCEL_BOOKING: "CANCEL_BOOKING",
@@ -473,11 +613,22 @@ export const EU_VAT_PREFIXES = Object.freeze([
 export const BOOKING_TYPE = Object.freeze({
     SIMPLE: "SIMPLE",
     DUAL_F1: "DUAL_F1",
-    DUAL_F2: "DUAL_F2"
+    DUAL_F2: "DUAL_F2",
+    /**
+     * Alias de clave legacy (v11.5): los consumidores historicos escriben
+     * BOOKING_TYPE.DUALF1 (sin guion). El VALOR es identico al canonico
+     * "DUAL_F1" (mismo string congelado), por lo que no se amplía el
+     * contrato: solo se preserva el handle de lectura legacy. normalizeBookingType
+     * ya aceptaba esa grafia como string.
+     */
+    DUALF1: "DUAL_F1",
+    DUALF2: "DUAL_F2"
 });
 
 export const BOOKING_FIELDS = Object.freeze({
-    STATUS: "bookingStatus"
+    STATUS: "bookingStatus",
+    /** Identificador externo de reserva (CitasF2). Unica referencia SSOT. */
+    BOOKING_ID: "bookingId"
 });
 
 // =============================================================================
@@ -485,6 +636,17 @@ export const BOOKING_FIELDS = Object.freeze({
 // =============================================================================
 export const INTEGRITY = Object.freeze({
     LEDGER_SCHEMA_VERSION: "LEDGER_V5_FISCAL"
+});
+
+/**
+ * IC-11 (v11.3): contrato JWT HS256 consumido por securityEngine.js
+ * (generateJWT/verifyJWT). Export ausente en v11.1 = SyntaxError ESM que
+ * tumbaba la carga de reservas.web/cajas.web (dto.whitelist) y crons.js
+ * (jobsConfigParity). Nombres canonicos post BUG-02: EXPIRATION_MS.
+ */
+export const JWT = Object.freeze({
+    ALGORITHM: "HS256",
+    EXPIRATION_MS: 900000
 });
 
 // =============================================================================
@@ -551,4 +713,42 @@ export const ITEM_NATURE = Object.freeze({
 export const CODIGO_IMPUESTO = Object.freeze({
     IVA: "IVA",
     EXENTO: "EXENTO"
+});
+
+// =============================================================================
+// BLOQUE 18 - FISCALES/EVENTLOG (v5011 hotfix)
+// Enums consumidos por eventLog.js / events.js que quedaron huérfanos tras la
+// reestructuración del SSOT. Valores según uso real en código vivo y campos
+// de colección documentados (MovimientosCaja.correctionReason, ticketBAI).
+// =============================================================================
+
+// AEAT TicketBAI — motivo de rectificación (campos TFI: NUMERO_SERIE, OTROS...)
+export const CORRECTION_REASON = Object.freeze({
+    NUMERO_SERIE: "NUMERO_SERIE",
+    REPETICION: "REPETICION",
+    OPERACION_NULA: "OPERACION_NULA",
+    IMPORTES: "IMPORTES",
+    OTROS: "OTROS",
+    OTRAS: "OTRAS" // alias usado en events.js:1000 (refund genérico)
+});
+
+export const VAT_ACCRUAL_STATUS = Object.freeze({
+    DEVENGADO: "DEVENGADO",
+    APLICACION_ANTICIPO: "APLICACION_ANTICIPO",
+    NO_DEVENGADO: "NO_DEVENGADO"
+});
+
+export const EVENT_TYPE = Object.freeze({
+    VENTA_LINEA: "VENTA_LINEA",
+    COMPRA_LINEA: "COMPRA_LINEA",
+    MOV_STOCK: "MOV_STOCK",
+    AJUSTE: "AJUSTE",
+    CIERRE_Z: "CIERRE_Z",
+    RECTIFICATIVA: "RECTIFICATIVA"
+});
+
+export const PROJECTION_STATUS = Object.freeze({
+    PENDIENTE: "PENDIENTE",
+    OK: "OK",
+    ERROR: "ERROR"
 });

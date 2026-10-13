@@ -16,7 +16,7 @@ CORRECTIONS (heredadas): CRON-01..CRON-06.
 */
 
 import wixData from "wix-data";
-import { BUSINESS_COLLECTIONS, OPERATIONAL_COLLECTIONS, SDK_CONFIG, CONCURRENCY } from "backend/internalConfig";
+import { BUSINESS_COLLECTIONS, OPERATIONAL_COLLECTIONS, SDK_CONFIG, CONCURRENCY, CONTROL_TYPE, CONTROL_STATUS } from "backend/internalConfig";
 import { makeTraceId, _safeTrim, _looksLikeGuid, withTimeout } from "public/mmUtils";
 import { logger } from "backend/logger";
 import { verifyFiscalHashChainIntegrity } from "backend/cajas.web";
@@ -338,8 +338,9 @@ export async function systemHealthCheck() {
             BUSINESS_COLLECTIONS.CITAS_F2,
             BUSINESS_COLLECTIONS.MOVIMIENTOS_CAJA,
             OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO,
-            BUSINESS_COLLECTIONS.MAPA_STAFF,
-            OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO,
+            // IC-10: MapaStaff suprimida; la identidad staff vive ahora en
+            // DatosFiscales(recordType=STAFF_CONFIG), ya cubierta arriba.
+            BUSINESS_COLLECTIONS.DATOS_FISCALES,
         ];
 
         for (const col of criticalCols) {
@@ -368,13 +369,18 @@ export async function systemHealthCheck() {
             results.fiscalChain !== "SUCCESS";
 
         if (hasIssues) {
+            // IC-10 / ADR-05: AlertasOperativas fue suprimida; las alertas de
+            // salud viven en ControlOperativo como subtipo ALERT. Escribir en
+            // la coleccion antigua lanzaba ReferenceError silencioso capturado
+            // por el catch exterior (deuda eradica).
             await wixData
                 .insert(
-                    COLLECTIONS.ALERTAS_OPERATIVAS, {
+                    OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO, {
+                        controlType: CONTROL_TYPE.ALERT,
                         alertType: "HEALTH_CHECK_ISSUES",
                         severity: "WARNING",
                         message: "systemHealthCheck detected issues",
-                        status: "OPEN",
+                        status: CONTROL_STATUS.OPEN,
                         traceId,
                         _createdDate: new Date(),
                     }, { suppressAuth: true }
@@ -383,5 +389,137 @@ export async function systemHealthCheck() {
         }
     } catch (err) {
         log.error("systemHealthCheck failed", { error: err?.message, traceId });
+    }
+}
+
+// =============================================================================
+// CRON 7: verifyNightlyZClosing - 20 1 * * * (parity jobs.config)
+// =============================================================================
+
+const MADRID_TZ = "Europe/Madrid";
+
+function _madridYmd(date) {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: MADRID_TZ }).format(date);
+}
+
+/**
+ * Verificacion del cierre Z del dia anterior (UTC+Madrid). Idempotente:
+ * si la fila Z_<ymd> ya existe y esta CERRADO/SIGNED, sale sin alertar.
+ * Intenta el cierre automatico delegando en cajas.registerZClosing; si el
+ * cron no tiene sesion de cajero (ACCESS_DENIED en Velo real), registra una
+ * alerta NIGHTLY_Z_CLOSING_MANUAL_REQUIRED deduplicada por clave estable.
+ */
+export async function verifyNightlyZClosing() {
+    const traceId = makeTraceId("cron-zclosing");
+    try {
+        const ymd = _madridYmd(new Date(Date.now() - 24 * 60 * 60 * 1000));
+        const zId = `Z_${ymd}`;
+
+        const existing = await withTimeout(
+            wixData.get(BUSINESS_COLLECTIONS.HISTORICO_CIERRES_Z, zId, { suppressAuth: true }),
+            API_TIMEOUT_MS, "verifyNightlyZClosing.get"
+        ).catch(() => null);
+
+        if (existing && _safeTrim(existing.closingStatus) === "CERRADO") {
+            log.info("verifyNightlyZClosing: day already closed", { zId, traceId });
+            return;
+        }
+
+        // Intento de cierre automatico (requiere sesion de cajero en runtime).
+        const { registerZClosing } = await import("backend/cajas.web");
+        try {
+            const res = await registerZClosing(ymd, { traceId });
+            if (res?.status === "SUCCESS" || res?.data?.closingStatus === "CERRADO") {
+                log.info("verifyNightlyZClosing: automatic Z closing succeeded", { zId, traceId });
+                return;
+            }
+            const code = res?.error?.code;
+            if (code !== "ACCESS_DENIED" && code !== "Z_ALREADY_CLOSED") {
+                throw new Error(`registerZClosing returned ${String(code)}`);
+            }
+        } catch (innerErr) {
+            const msg = String(innerErr?.message || "");
+            if (!msg.includes("ACCESS_DENIED")) throw innerErr;
+        }
+
+        // ACCESS_DENIED sin cierre: alerta manual deduplicada (no throw para
+        // evitar reintentos infinitos del runner; requiere accion humana).
+        const dedupeKey = `ALERT:NIGHTLY_Z:${zId}`;
+        const dup = await wixData
+            .query(OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO)
+            .eq("dedupeKey", dedupeKey)
+            .limit(1)
+            .count();
+        if (dup > 0) {
+            log.warn("verifyNightlyZClosing: manual-required alert already present", { zId, traceId });
+            return;
+        }
+        await wixData.insert(OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO, {
+            controlType: CONTROL_TYPE.ALERT,
+            alertType: "NIGHTLY_Z_CLOSING_MANUAL_REQUIRED",
+            dedupeKey,
+            severity: "WARNING",
+            message: `Z closing for ${ymd} requires authenticated cashier action`,
+            status: CONTROL_STATUS.OPEN,
+            traceId,
+            _createdDate: new Date(),
+        }, { suppressAuth: true });
+        log.warn("verifyNightlyZClosing: raised MANUAL_REQUIRED alert", { zId, traceId });
+    } catch (err) {
+        log.error("verifyNightlyZClosing failed", { error: err?.message, traceId });
+    }
+}
+
+// =============================================================================
+// CRON 8: cleanAuditLogs - 0 2 * * 0 (paridad jobs.config, retencion 90 dias)
+// =============================================================================
+
+const AUDIT_RETENTION_DAYS = 90;
+
+/**
+ * Purga semanal de logs operativos con retencion de 90 dias (ADR-05 safe):
+ *  - ALERT: terminales (todas las antiguas, OPEN incluidas se consideran
+ *    accionadas tras 90d de vida util del registro).
+ *  - COMPENSATION: solo estados terminales EXECUTED/FAILED.
+ *  - WEBHOOK_EVENT: solo PROCESSED/CLOSED (append-only fiscal: nunca los
+ *    pendientes).
+ *  - SLOT_LOCK/RATE_LIMIT/caches: NUNCA aqui (los purga cleanExpiredLocks por
+ *    expiresAt; borrarlos por antiguedad romper ia semantica de TTL).
+ */
+export async function cleanAuditLogs() {
+    const traceId = makeTraceId("cron-audit");
+    try {
+        const cutoff = new Date(Date.now() - AUDIT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+        const TERMINAL = [
+            CONTROL_STATUS.EXECUTED, CONTROL_STATUS.FAILED,
+            CONTROL_STATUS.PROCESSED, CONTROL_STATUS.CLOSED,
+        ];
+        const PURGABLE = [CONTROL_TYPE.ALERT, CONTROL_TYPE.COMPENSATION, CONTROL_TYPE.WEBHOOK_EVENT];
+
+        let removed = 0;
+        for (const controlType of PURGABLE) {
+            const res = await withTimeout(
+                wixData
+                    .query(OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO)
+                    .eq("controlType", controlType)
+                    .lt("_createdDate", cutoff)
+                    .limit(100)
+                    .find({ suppressAuth: true }),
+                API_TIMEOUT_MS, "cleanAuditLogs.query"
+            );
+            for (const item of res?.items || []) {
+                const isAlert = controlType === CONTROL_TYPE.ALERT;
+                const isTerminal = TERMINAL.includes(item.status);
+                if (!isAlert && !isTerminal) continue;
+                await wixData
+                    .remove(OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO, item._id, { suppressAuth: true })
+                    .catch(() => null);
+                removed++;
+            }
+        }
+
+        log.info("cleanAuditLogs completed", { removed, cutoff: cutoff.toISOString(), traceId });
+    } catch (err) {
+        log.error("cleanAuditLogs failed", { error: err?.message, traceId });
     }
 }
