@@ -233,11 +233,14 @@ function auditFlow1_ReservaSimpleOnline() {
     const doubleEntryValid = Math.abs(asientoExpected.totalDebe - asientoExpected.totalHaber) < 0.01;
     assert(doubleEntryValid, "Paso 4: Asiento contable no cuadra (partida doble)", "CRITICAL");
 
-    // Verificar cuentas PGC canonicas (claves canonicas internas: BANKS/SERVICE_REVENUE/VAT_OUTPUT)
+    // Verificar cuentas PGC canonicas (claves SSOT canonicas internas de
+    // ACCOUNTING_ACCOUNT: CAJA/INGRESOS_SERVICIOS/IVA_REPERCUTIDO. Las claves
+    // legacy BANKS/SERVICE_REVENUE/VAT_OUTPUT fueron erradicadas del SSOT en
+    // FASE4-CONSOLIDADO junto con el alias CUENTAS_PGC.)
     const pgcAccountsValid = [
-        CUENTAS_PGC.BANKS, // 572000
-        CUENTAS_PGC.SERVICE_REVENUE, // 705000
-        CUENTAS_PGC.VAT_OUTPUT, // 477000
+        CUENTAS_PGC.CAJA, // 572000
+        CUENTAS_PGC.INGRESOS_SERVICIOS, // 705000
+        CUENTAS_PGC.IVA_REPERCUTIDO, // 477000
     ].every(acc => acc && /^\d{6}$/.test(acc));
     assert(pgcAccountsValid, "Paso 4: Cuentas PGC no tienen formato canonico (6 digitos)", "CRITICAL");
 
@@ -885,9 +888,9 @@ function auditFlow7_VentaOnline() {
         totalDebe: 150.00,
         totalHaber: 150.00,
         lines: [
-            { accountCode: CUENTAS_PGC.BANKS, debit: 150.00, credit: 0 },
+            { accountCode: CUENTAS_PGC.CAJA, debit: 150.00, credit: 0 }, // 572000 (antes BANKS)
             { accountCode: "700000", debit: 0, credit: 123.97 }, // Venta de mercaderías
-            { accountCode: CUENTAS_PGC.VAT_OUTPUT, debit: 0, credit: 26.03 },
+            { accountCode: CUENTAS_PGC.IVA_REPERCUTIDO, debit: 0, credit: 26.03 }, // 477000 (antes VAT_OUTPUT)
         ],
     };
 
@@ -1128,13 +1131,13 @@ function verifyDataIntegrityInCollections() {
     // Verificación: Cuentas PGC canónicas
     const pgcAccountsCheck = {
         name: "CUENTAS_PGC_CANONICAS",
+        // FASE4-CONSOLIDADO: claves SSOT canonicas de ACCOUNTING_ACCOUNT
+        // (las claves legacy CASH/BANKS/SERVICE_REVENUE/VAT_OUTPUT/VAT_INPUT/
+        // SUPPLIERS fueron erradicadas del SSOT; se auditan las existentes).
         expectedAccounts: {
-            CAJA: "570000",
-            BANCOS: "572000",
-            PRESTACIONES_SERVICIOS: "705000",
+            CAJA: "572000",
+            INGRESOS_SERVICIOS: "705000",
             IVA_REPERCUTIDO: "477000",
-            IVA_SOPORTADO: "472000",
-            PROVEEDORES: "400000",
             CLIENTES: "430000",
         },
         status: "PASS",
@@ -1142,9 +1145,7 @@ function verifyDataIntegrityInCollections() {
     };
 
     for (const [key, expectedCode] of Object.entries(pgcAccountsCheck.expectedAccounts)) {
-        // FASE4: mapa clave legacy del test -> clave canonica ACCOUNTING_ACCOUNT
-        const KEY_MAP = { CAJA: "CASH", BANCOS: "BANKS", PRESTACIONES_SERVICIOS: "SERVICE_REVENUE", IVA_REPERCUTIDO: "VAT_OUTPUT", IVA_SOPORTADO: "VAT_INPUT", PROVEEDORES: "SUPPLIERS", CLIENTES: "CLIENTS" };
-        const actualCode = CUENTAS_PGC[KEY_MAP[key] || key];
+        const actualCode = CUENTAS_PGC[key];
         if (actualCode !== expectedCode) {
             pgcAccountsCheck.issues.push(`Cuenta ${key}: esperado ${expectedCode}, obtenido ${actualCode || "no definida"}`);
         }
