@@ -1,50 +1,47 @@
 /*
 MODULE: backend/booking/bookingSaga.js
-VERSION: v5010.7-SAGA11-SAGA12
-BASE: v5010.6-PAIRTOKEN-SUPPLIED-ACTIVE + SAGA-11 + SAGA-12 + SYNTAX RECOVERY
+VERSION: v5011-ALIGNED
+BASE: v5010.7-SAGA11-SAGA12 + alineacion contrato add-ons CMS
 STANDARDS: G10 ASCII estricto. Cero suppressHooks/suppressAuth.
 CONTRATO: Reserva dual = DOS createBooking independientes unidos por pairToken.
           Multiservice Booking PROHIBIDO (BIBLIA 3.6).
 
-FIXES v5010.7:
-  SAGA-11 (P0) PAYMENT_METHOD.ONLINE no existe en internalConfig. El canal
-         online/presencial se discrimina con CHANNEL_TYPE (BIBLIA §6.3).
-         ANTES: isOnline siempre false -> CreateCheckout nunca se ejecutaba ->
-         toda reserva online se confirmaba como presencial sin cobrar.
-         AHORA: usa CHANNEL_TYPE.ONLINE para el discriminador y pasa
-         selectedPaymentOption:"ONLINE" al Writer V2.
-  SAGA-12 (P1) dedupeKey de compensacion usaba Date.now() -> cada reintento de
-         runPendingCompensationsJob insertaba fila nueva y la compensacion nunca
-         se cerraba. Ahora es determinista: COMP_<KIND>_<bookingId>.
-  SYNTAX (P0) Recuperacion completa del adjunto v5010.4 corrupto:
-         - 9 especificadores de modulo con espacio final
-         - COMPENS ATION_KIND -> COMPENSATION_KIND
-         - withTi meout -> withTimeout
-         - OPERAT IONAL_COLLECTIONS -> OPERATIONAL_COLLECTIONS
-         - PAYMENT_STATUS.NOT_P AID -> NOT_PAID
-         - BOOKING_STATUS_PENDING_P AYMENT -> PENDING_PAYMENT
-         - BOOKIN G_STATUS.REFUNDED -> BOOKING_STATUS.REFUNDED
-         - _safeTrim(params.f1Start). slice -> .slice
-         - _hashKey(fingerprin t) -> fingerprint
-         - normalizePersistedMeta -> _normalizePersistedMeta
-         - bookings.cre ateBooking -> createBooking
-         - _normal izeLocalIsoStr -> _normalizeLocalIsoStr
-         - getUtcDateFromMadridLocal(f2 StartLocal) -> f2StartLocal
-         - STAFF_UNAVAI LABLE -> STAFF_UNAVAILABLE
-         - compensate Fn -> compensateFn
-         - serviceCon fig -> serviceConfig
-         - linkedValidation.phase2Du ration -> phase2Duration
-         - getMadridLoca lStringNoZ -> getMadridLocalStringNoZ
-         - slotF2Input.localEndD ate -> localEndDate
-         - _normalizeLocalIsoStr (...) -> sin espacio antes de parentesis
-         - ~40 apariciones de & & -> &&
-         - Todos los literales con espacio final
+FIXES APLICADOS v5011-ALIGNED:
+  SAGA-13 (P0): _detectAddons lee el catalogo de add-ons desde
+                serviceConfig.addOnOptions a NIVEL RAIZ (contrato del DTO de
+                reservas.web.js v5011-ALIGNED). Mantiene fallback a
+                serviceConfig.metadata.addOnOptions por compatibilidad.
+                Compara SOLO contra addOnId (el nativeId no existe en
+                ComplementosCatalogo).
+  SAGA-14 (P0): _buildAddonSlotFields ELIMINADO. Los add-ons ya no viajan
+                dentro del slot (Wix Bookings Writer V2 los ignora ahi).
+                Se sustituye por _buildBookedAddOns importado de bookingCore,
+                que devuelve [{ addOnId }, ...] para el body de createBooking
+                a NIVEL RAIZ.
+  SAGA-15 (P0): el body de createBooking incluye bookedAddOns a nivel raiz
+                (solo si hay add-ons). Cero inyeccion en bookedEntity.slot.
+  SAGA-16 (P1): meta de CitasF2 guarda SOLO addOnIds (canonico v20.2).
+                Se elimina la duplicacion nativeAddonIds/addOnIds.
+  SAGA-17 (P1): import de colecciones migrado a COLLECTIONS. Los alias
+                BUSINESS_COLLECTIONS y OPERATIONAL_COLLECTIONS se mantienen
+                disponibles en internalConfig v20.2 pero el modulo usa los
+                canonicos.
 
-FIXES HEREDADOS:
+FIXES HEREDADOS v5010.7:
+  SAGA-11 (P0): PAYMENT_METHOD.ONLINE no existe; se discrimina con
+                CHANNEL_TYPE (BIBLIA 6.3).
+  SAGA-12 (P1): dedupeKey de compensacion determinista.
+  SYNTAX (P0): Recuperacion completa del adjunto v5010.4 corrupto.
+
+FIXES HEREDADOS v5010.3/v5010.2/v5009:
   v5010.3: Revision guard en _compensateCreatedBookings.
   v5010.2: SAGA-PATCH-01..07.
   v5009: SAGA-01..SAGA-09.
-  D3: pairToken SUPPLIED activo (reservas.web emite token real).
+  D3: pairToken SUPPLIED activo.
+
+PENDIENTES (fuera de este pase):
+  - Migracion de dataLegacyAdapter a backend/dataAccess. Requiere conocer
+    la API completa de mutations del DAL (insert/update/remove/get elevados).
 =============================================================================
 */
 
@@ -52,7 +49,7 @@ import { bookings } from "@wix/bookings";
 import { auth } from "@wix/essentials";
 import wixData from "backend/dataLegacyAdapter";
 import {
-    BUSINESS_COLLECTIONS,
+    COLLECTIONS,
     OPERATIONAL_COLLECTIONS,
     CONTROL_TYPE,
     CONCURRENCY,
@@ -61,7 +58,6 @@ import {
     BOOKING_STATUS,
     BOOKING_TYPE,
     PAYMENT_STATUS,
-    PAYMENT_METHOD,
     CHANNEL_TYPE,
     COMPENSATION_KIND,
     COMPENSATION_STATUS,
@@ -97,6 +93,7 @@ import {
     _forceStaffInPristineSlot,
     _resolveScheduleIdForResource,
     _buildLockKeys,
+    _buildBookedAddOns,
     createBookingError,
     normalizeError,
     ERROR_CODES,
@@ -118,8 +115,8 @@ const log = logger;
 // =============================================================================
 const LOCK_TTL_MS = Number(CONCURRENCY && CONCURRENCY.MS_TTL_MUTEX) || 300000;
 const HEARTBEAT_MS = Number(CONCURRENCY && CONCURRENCY.MS_LATIDO) || 15000;
-const CITAS_COL = BUSINESS_COLLECTIONS.CITAS_F2;
-const SERVICIOS_COL = BUSINESS_COLLECTIONS.SERVICIOS_CATALOGO;
+const CITAS_COL = COLLECTIONS.CITAS_F2;
+const SERVICIOS_COL = COLLECTIONS.SERVICIOS_CATALOGO;
 const COMPENSACIONES_COL = OPERATIONAL_COLLECTIONS.CONTROL_OPERATIVO;
 const MINUTOS_MAX_HUECO_DUAL = Math.max(
     0,
@@ -140,8 +137,6 @@ const BOOKING_STATUS_PENDING_PAYMENT = _safeTrim(
     BOOKING_STATUS.PENDING || BOOKING_STATUS.PENDING_PAYMENT
 );
 
-// SAGA-11: discriminador de canal. CHANNEL_TYPE.ONLINE === "ONLINE" coincide con
-// selectedPaymentOption nativo de Wix Bookings. PAYMENT_METHOD no tiene ONLINE.
 const CHANNEL_ONLINE = _safeTrim(CHANNEL_TYPE.ONLINE).toUpperCase();
 const CHANNEL_PRESENCIAL = _safeTrim(CHANNEL_TYPE.PRESENCIAL).toUpperCase();
 const BOOKING_PAYMENT_OPTION_ONLINE = "ONLINE";
@@ -321,9 +316,6 @@ async function _compensateCreatedBookings(createdBookings, traceId) {
                 traceId: traceId,
                 error: cancelErr && cancelErr.message
             });
-            // SAGA-12: dedupeKey determinista. Sin Date.now(). El indice unico de
-            // ControlOperativo.dedupeKey garantiza una sola fila por reserva; los
-            // reintentos actualizan attempts/lastError dentro de payloadJson.
             const compDedupeKey = "COMP_" + COMPENSATION_KIND.CANCEL_BOOKING + "_" + bookingId;
             try {
                 await wixData.insert(COMPENSACIONES_COL, {
@@ -546,7 +538,7 @@ async function _deleteCitasByPairToken(pairToken, traceId) {
     try {
         const res = await wixData
             .query(CITAS_COL)
-            .eq("pairToken", token)
+            .eq(BOOKING_FIELDS.PAIR_TOKEN, token)
             .limit(10)
             .find();
         const items = (res && res.items) || [];
@@ -577,19 +569,29 @@ async function _deleteCitasByPairToken(pairToken, traceId) {
 }
 
 // =============================================================================
-// BLOCK 11 - ADDONS (SAGA-04 + SAGA-PATCH-01/06)
+// BLOCK 11 - ADDONS (SAGA-04 + SAGA-13 + SAGA-14)
 // =============================================================================
+
+/**
+ * SAGA-13: detecta y valida los add-ons solicitados contra el catalogo del
+ * servicio.
+ *
+ * Contrato CMS (v20.2):
+ *   - El DTO de reservas expone serviceConfig.addOnOptions a RAIZ, con forma
+ *     [{ addOnId, name, price, description, durationMinutes, taxIncluded,
+ *        tipoImpositivo, sku }].
+ *   - `addOnId` es el GUID de ComplementosCatalogo. NO existe nativeId.
+ *   - Fallback de lectura a serviceConfig.metadata.addOnOptions (compatibilidad
+ *     con versiones anteriores del DTO).
+ *
+ * Devuelve la lista de GUIDs de add-ons validados, deduplicada y preservando
+ * el orden de solicitud.
+ */
 function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
-    // AUDIT-BUG-01/18 (v11.6): bookedAddOns es el nombre canonico de entrada;
-    // addOnIds/nativeAddonIds quedan solo como compatibilidad legacy. La
-    // normalizacion ocurre una unica vez aqui y el resultado detectAddonIds
-    // se propaga identico a disponibilidad-reservacion-persistencia.
     const rawAddons =
         (unsafePayload && unsafePayload.bookedAddOns) ||
-        (unsafePayload && unsafePayload.nativeAddonIds) ||
         (unsafePayload && unsafePayload.addOnIds) ||
         (metaCita && metaCita.bookedAddOns) ||
-        (metaCita && metaCita.nativeAddonIds) ||
         (metaCita && metaCita.addOnIds) ||
         [];
     const requested = Array.isArray(rawAddons)
@@ -607,15 +609,17 @@ function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
         );
     }
 
-    const catalogAddons = Array.isArray(serviceConfig && serviceConfig.metadata && serviceConfig.metadata.addOnOptions)
-        ? serviceConfig.metadata.addOnOptions
-        : [];
+    // Catalogo canonico: serviceConfig.addOnOptions a raiz.
+    const catalogAddons = Array.isArray(serviceConfig && serviceConfig.addOnOptions)
+        ? serviceConfig.addOnOptions
+        : Array.isArray(serviceConfig && serviceConfig.metadata && serviceConfig.metadata.addOnOptions)
+            ? serviceConfig.metadata.addOnOptions
+            : [];
+
     const allowedSet = new Set();
     for (let c = 0; c < catalogAddons.length; c++) {
-        const nativeId = _safeTrim(catalogAddons[c] && catalogAddons[c].nativeId);
         const addonId = _safeTrim(catalogAddons[c] && catalogAddons[c].addOnId);
-        if (nativeId) allowedSet.add(nativeId);
-        if (addonId) allowedSet.add(addonId);
+        if (addonId && _looksLikeGuid(addonId)) allowedSet.add(addonId);
     }
 
     if (unique.length > 0 && allowedSet.size > 0) {
@@ -636,21 +640,13 @@ function _detectAddons(unsafePayload, metaCita, serviceConfig, traceId) {
     }
 
     if (unique.length > 0) {
-        log.info("SAGA-04: injecting addOnIds", {
+        log.info("SAGA-13: addons detected (catalog empty; passthrough)", {
             traceId: traceId,
             addonCount: unique.length,
             addOnIds: unique
         });
     }
     return unique;
-}
-
-function _buildAddonSlotFields(addOnIds) {
-    if (!Array.isArray(addOnIds) || addOnIds.length === 0) return {};
-    return {
-        addOnIds: addOnIds.slice(),
-        selectedAddOns: addOnIds.slice()
-    };
 }
 
 // =============================================================================
@@ -785,9 +781,6 @@ export async function executeBookingSaga(unsafePayload) {
         if (!email) {
             throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Email is required", { traceId: traceId });
         }
-        // AUDIT-BUG-17/24 (v11.6): el consentimiento RGPD es requisito de
-        // negocio y LOPD/GDPR, no opcional. Se exige en servidor porque el
-        // payload del cliente nunca es fuente de verdad para permisos legales.
         const rgpdConsent =
             (unsafePayload && unsafePayload.rgpdConsent === true) ||
             metaCita.rgpdConsent === true;
@@ -822,12 +815,6 @@ export async function executeBookingSaga(unsafePayload) {
         if (!f1LocalStart || !f1LocalEnd) {
             throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "F1 slot dates are required", { traceId: traceId });
         }
-        // AUDIT-BUG-19 (v11.6): rechazo de intervalos imposibles antes de
-        // bloquear locks. start < end por fase; solape F1/F2 se cubre en
-        // _validateDualGap (gap >= 0 y <= MAX). Duracion negativa o cero ->
-        // rechazo explicito. (v11.7 FIX: esta comprobacion se insertaba ANTES
-        // de definir f1LocalStart/f1LocalEnd -> ReferenceError en runtime.
-        // Movida a su posicion correcta, tras la normalizacion de fechas.)
         const f1StartMs = Date.parse(f1LocalStart);
         const f1EndMs = Date.parse(f1LocalEnd);
         if (
@@ -845,9 +832,6 @@ export async function executeBookingSaga(unsafePayload) {
         if (isDual) {
             f2LocalStart = _normalizeLocalIsoStr(slotF2Input.localStartDate || slotF2Input.start || metaCita.f2Start);
             f2LocalEnd = _normalizeLocalIsoStr(slotF2Input.localEndDate || slotF2Input.end || metaCita.f2End);
-            // AUDIT-BUG-19 (v11.6): slotF2 incompleto en reserva dual es
-            // payload invalido; no se permite derivar silenciosamente sin
-            // al menos la fecha de inicio.
             if (!f2LocalStart && !f2LocalEnd) {
                 throw createBookingError(
                     ERROR_CODES.INVALID_PAYLOAD,
@@ -871,7 +855,6 @@ export async function executeBookingSaga(unsafePayload) {
             _validateDualGap(f1LocalEnd, f2LocalStart, traceId);
         }
         const detectedAddonIds = _detectAddons(unsafePayload, metaCita, serviceConfig, traceId);
-        const addonSlotFields = _buildAddonSlotFields(detectedAddonIds);
 
         // ---------------- PHASE 1: REAL-TIME REVALIDATION ----------------
         const resourceValidation = await _resolveStaffForSlotInternal({
@@ -1011,6 +994,8 @@ export async function executeBookingSaga(unsafePayload) {
         );
 
         // ---------------- CREATE BOOKINGS F1 -> F2 ----------------
+        // SAGA-14/15: los add-ons viajan como bookedAddOns a NIVEL RAIZ del
+        // body de createBooking, NUNCA dentro de bookedEntity.slot.
         saga.addStep(
             "CreateBookings",
             async function () {
@@ -1026,7 +1011,6 @@ export async function executeBookingSaga(unsafePayload) {
                     })
                 });
 
-                // SAGA-11: discriminador de canal via CHANNEL_TYPE, no PAYMENT_METHOD.
                 const requestedChannel = _safeTrim(
                     (unsafePayload && unsafePayload.channelType) ||
                     (unsafePayload && unsafePayload.paymentMethod) ||
@@ -1035,8 +1019,11 @@ export async function executeBookingSaga(unsafePayload) {
                 ).toUpperCase();
                 const wantsOnline = requestedChannel === CHANNEL_ONLINE;
 
+                // SAGA-14: bookedAddOns a nivel raiz.
+                const bookedAddOns = _buildBookedAddOns(detectedAddonIds);
+
                 const pristineF1 = await _forceStaffInPristineSlot(
-                    Object.assign({}, validatedSlotF1, { location: bookingLocation }, addonSlotFields),
+                    Object.assign({}, validatedSlotF1, { location: bookingLocation }),
                     finalResourceId,
                     serviceId,
                     serviceConfig.phase1Duration
@@ -1052,6 +1039,7 @@ export async function executeBookingSaga(unsafePayload) {
                     contactDetails: contactDetails,
                     totalParticipants: 1
                 };
+                if (bookedAddOns.length > 0) bookingBodyF1.bookedAddOns = bookedAddOns;
                 if (wantsOnline) bookingBodyF1.selectedPaymentOption = BOOKING_PAYMENT_OPTION_ONLINE;
 
                 const resF1 = await _createBookingWithSelectiveElevation(bookingBodyF1, bookingOptions, traceId);
@@ -1070,7 +1058,7 @@ export async function executeBookingSaga(unsafePayload) {
                 let pristineF2 = null;
                 if (isDual && f2LocalStart && validatedSlotF2) {
                     pristineF2 = await _forceStaffInPristineSlot(
-                        Object.assign({}, validatedSlotF2, { location: bookingLocation }, addonSlotFields),
+                        Object.assign({}, validatedSlotF2, { location: bookingLocation }),
                         finalResourceId,
                         linkedPhases,
                         serviceConfig.phase2Duration
@@ -1086,6 +1074,7 @@ export async function executeBookingSaga(unsafePayload) {
                         contactDetails: contactDetails,
                         totalParticipants: 1
                     };
+                    if (bookedAddOns.length > 0) bookingBodyF2.bookedAddOns = bookedAddOns;
                     if (wantsOnline) bookingBodyF2.selectedPaymentOption = BOOKING_PAYMENT_OPTION_ONLINE;
 
                     const resF2 = await _createBookingWithSelectiveElevation(bookingBodyF2, bookingOptions, traceId);
@@ -1115,7 +1104,6 @@ export async function executeBookingSaga(unsafePayload) {
         );
 
         // ---------------- CHECKOUT / CONFIRM ----------------
-        // SAGA-11: isOnline derivado de CHANNEL_TYPE, no de PAYMENT_METHOD.ONLINE.
         const isOnline = _safeTrim(
             (unsafePayload && unsafePayload.channelType) ||
             (unsafePayload && unsafePayload.paymentMethod) ||
@@ -1228,6 +1216,7 @@ export async function executeBookingSaga(unsafePayload) {
                     });
                 }
 
+                // SAGA-16: meta guarda solo addOnIds (canonico).
                 await _persistBooking({
                     bookingId: bookingF1Id,
                     revision: revisionF1,
@@ -1249,7 +1238,6 @@ export async function executeBookingSaga(unsafePayload) {
                         f2Start: f2LocalStart || null,
                         f2End: f2LocalEnd || null,
                         checkoutUrl: resolvedCheckoutUrl,
-                        nativeAddonIds: detectedAddonIds,
                         addOnIds: detectedAddonIds,
                         locationType: "OWNER_BUSINESS",
                         writerRevision: revisionF1
@@ -1283,7 +1271,6 @@ export async function executeBookingSaga(unsafePayload) {
                             pairToken: pairToken,
                             pairTokenSource: tokenResolution.source,
                             linkedF1BookingId: bookingF1Id,
-                            nativeAddonIds: detectedAddonIds,
                             addOnIds: detectedAddonIds,
                             locationType: "OWNER_BUSINESS",
                             writerRevision: revisionF2
