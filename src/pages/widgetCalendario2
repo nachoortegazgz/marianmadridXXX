@@ -431,14 +431,14 @@ function requestDays() {
     });
 }
 
-function requestSlots(dateYMD) {
+function requestSlots(dateYmd) {
     const requestSequence = ++state.request;
     state.latestAvailability = requestSequence;
     post(MESSAGE_TYPES.AVAIL, {
         action: "slots",
         serviceId: idOf(state.service?.serviceId),
         resourceId: state.staffId || null,
-        dateYMD,
+        dateYmd,
         addOnIds: Array.from(state.addons).sort(),
         requestSequence
     });
@@ -583,7 +583,10 @@ function confirmBooking() {
         slotF1: phase1.slotRef || null,
         slotF2: phase2.slotRef || null,
         addOnIds: Array.from(state.addons).slice(0, CONFIG.maxAddOns),
-        cliente: { nombre: name, email, telefono: phone },
+        firstName: name,
+        lastName: "",
+        email,
+        phone,
         paymentMethod: document.querySelector("input[name='paymentMethod']:checked")?.value || "PRESENCIAL",
         rgpdConsent: true
     });

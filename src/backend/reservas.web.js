@@ -175,6 +175,18 @@ function _readServiceField(service, field) {
     return service[field] ?? null;
 }
 
+function _normalizeLocationId(value) {
+    const values = Array.isArray(value) ? value : [value];
+    for (const candidate of values) {
+        const raw = candidate && typeof candidate === "object"
+            ? candidate.id || candidate._id || candidate.value
+            : candidate;
+        const id = _safeTrim(raw);
+        if (_looksLikeGuid(id)) return id;
+    }
+    return null;
+}
+
 function _isValidMadridYmd(value) {
     const ymd = _safeTrim(value);
     const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
@@ -526,7 +538,7 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     const taxIncluded = _readServiceField(service, "taxIncluded") === true;
     const tipoImpositivo = Number(_readServiceField(service, "tipoImpositivo")) || 0;
     const categoryId = _safeTrim(_readServiceField(service, "categoryId")) || null;
-    const locationId = _safeTrim(_readServiceField(service, "locationId")) || null;
+    const locationId = _normalizeLocationId(_readServiceField(service, "locationId"));
     const location = _safeTrim(_readServiceField(service, "location")) || null;
     const mainMedia = _safeTrim(_readServiceField(service, "mainMedia")) || "";
     const shortDescription = _safeTrim(_readServiceField(service, "tagLine")) || null;
@@ -709,7 +721,8 @@ const _CONFIRMATION_DTO_FIELDS = Object.freeze([
     "slotEnd",
     "resourceId",
     "pairToken",
-    "totalPrice"
+    "totalPrice",
+    "totalAmount"
 ]);
 
 function _toConfirmationDto(item) {

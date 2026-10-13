@@ -51,9 +51,19 @@ const ELEMENT_IDS = Object.freeze({
 
 let resolvedBookingId = null;
 
-export function onReady() {
-    const params = new URLSearchParams($w.location.query);
-    resolvedBookingId = _safeTrim(params.get('bookingId'));
+export async function onReady() {
+    let context = {};
+    try {
+        context = (await wixWindow.lightbox.getContext()) || {};
+    } catch (_) {
+        context = {};
+    }
+    const params = new URLSearchParams($w.location.query || '');
+    resolvedBookingId = _safeTrim(
+        context.bookingId ||
+        context.booking?.bookingId ||
+        params.get('bookingId')
+    );
 
     if (!resolvedBookingId) {
         $w(ELEMENT_IDS.SUMMARY_TEXT).text =
@@ -174,7 +184,8 @@ function _formatEstadoPago(booking) {
 
 function _formatSummary(booking) {
     const slot = booking && booking.slot ? booking.slot : {};
-    const start = slot.startDate ? new Date(slot.startDate) : null;
+    const startValue = slot.startDate || booking.slotStart;
+    const start = startValue ? new Date(startValue) : null;
     const parts = [];
 
     if (start && !Number.isNaN(start.getTime())) {
@@ -187,15 +198,17 @@ function _formatSummary(booking) {
         );
     }
 
-    if (slot.serviceId) {
-        parts.push(`Servicio: ${slot.serviceId}`);
+    const serviceId = slot.serviceId || booking.serviceId;
+    if (serviceId) {
+        parts.push(`Servicio: ${serviceId}`);
     }
 
-    if (slot.resource && slot.resource.id) {
+    if ((slot.resource && slot.resource.id) || booking.resourceId) {
         parts.push(`Profesional asignado`);
     }
 
-    parts.push(`Importe: ${_formatEuro(booking.totalPrice || booking.price || 0)}`);
+    const amount = booking.totalPrice ?? booking.totalAmount ?? booking.price ?? 0;
+    parts.push(`Importe: ${_formatEuro(amount)}`);
 
     if (booking.pairToken) {
         parts.push('Cita dual (F1+F2) confirmada con el mismo profesional.');

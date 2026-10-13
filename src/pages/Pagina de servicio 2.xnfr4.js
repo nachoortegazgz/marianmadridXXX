@@ -4,7 +4,7 @@ VERSION: v5013.2-SERVICE-LOOKUP-FIX
 BASE: v5013.1-OPAQUE-ORIGIN-FIX + SYNTAX RECOVERY + PROTOCOL ALIGNMENT
 PURPOSE: Load the selected CMS service and provide the widget context.
 FIXES:
-  - Widget ID corrected to #htmlWidgetCustomService (confirmed in Editor).
+  - Widget ID corrected to #WidgetHtmlCustomService (confirmed in Editor).
   - Import PROTOCOL_URLS from widgetBridge (SSOT) instead of non-existent URLS.
   - Full syntax recovery: =>, &&, ||, ?? operators restored.
   - Recommendations field aligned with new CMS structure (service.recommendations).
@@ -288,7 +288,7 @@ $w.onReady(() => {
     let widget;
     try {
         // FIX: Correct Widget ID confirmed by user
-        widget = $w("#htmlWidgetCustomService");
+        widget = $w("#WidgetHtmlCustomService");
     } catch (_) {
         showError("El widget del servicio no está disponible.");
         return;

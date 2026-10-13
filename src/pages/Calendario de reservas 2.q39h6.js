@@ -4,7 +4,7 @@
  * STANDARDS: G10 ASCII Strict, Velo Native Optimized.
  *
  * Alineado con:
- *   - widget HTML (protocolo v1, messageId unico, bookedAddOns, slotF1/slotF2)
+ *   - widget HTML (protocolo v1, messageId unico, addOnIds, slotF1/slotF2)
  *   - backend/reservas.web.js (getServiceBySlugOrId, getAvailableDays, getAvailableSlots, getCertifiedDualSlots)
  *   - backend/citasManager.web.js (processDualBooking)
  *   - CMS ServiciosCatalogo (field keys title, description, price, location, addOnOptions, staffOptions)
@@ -14,7 +14,7 @@
  *   serviceId, slug,
  *   slotF1 {localStartDate, localEndDate, slotRef},
  *   slotF2 {localStartDate, localEndDate, slotRef} | null,
- *   resourceId, bookedAddOns[], email, firstName, lastName, phone,
+ *   resourceId, addOnIds[], email, firstName, lastName, phone,
  *   paymentMethod, rgpdConsent
  */
 
@@ -131,9 +131,7 @@ function handleNavigation(payload) {
 
 async function handleAvailability(payload, reply) {
     const action = _safeTrim(payload.action || "").toLowerCase();
-    const bookedAddOns = Array.isArray(payload.bookedAddOns)
-        ? payload.bookedAddOns
-        : [];
+    const addOnIds = normalizeAddOnIds(payload.addOnIds || payload.bookedAddOns);
     let result;
 
     try {
@@ -144,7 +142,7 @@ async function handleAvailability(payload, reply) {
                     payload.resourceId || null,
                     Number(payload.year),
                     Number(payload.month),
-                    bookedAddOns
+                    addOnIds
                 ),
                 UI?.FRONTEND_API_TIMEOUT_MS || 60000,
                 "getAvailableDays"
@@ -157,13 +155,13 @@ async function handleAvailability(payload, reply) {
                         currentServiceId || currentSlug,
                         payload.resourceId || null,
                         dateYmd,
-                        bookedAddOns
+                        addOnIds
                     )
                     : getAvailableSlots(
                         currentServiceId || currentSlug,
                         payload.resourceId || null,
                         dateYmd,
-                        bookedAddOns
+                        addOnIds
                     ),
                 UI?.FRONTEND_API_TIMEOUT_MS || 60000,
                 "getAvailableSlots"
@@ -194,9 +192,15 @@ async function handleAvailability(payload, reply) {
     );
 }
 
-function normalizeBookedAddOns(value) {
+function normalizeAddOnIds(value) {
     if (!Array.isArray(value)) return [];
-    return value.map(_safeTrim).filter(Boolean).slice(0, 20);
+    return Array.from(new Set(value.map((item) => {
+        if (typeof item === "string") return _safeTrim(item);
+        if (item && typeof item === "object") {
+            return _safeTrim(item.addOnId || item.addonId || item.id || item.value);
+        }
+        return "";
+    }).filter(Boolean))).slice(0, 20);
 }
 
 function buildBookingRequestPayload(bookingData, fallbackTraceId) {
@@ -208,6 +212,12 @@ function buildBookingRequestPayload(bookingData, fallbackTraceId) {
         bookingData.slotF2 && typeof bookingData.slotF2 === "object"
             ? bookingData.slotF2
             : null;
+    const contact = bookingData.cliente && typeof bookingData.cliente === "object"
+        ? bookingData.cliente
+        : {};
+    const addOnIds = normalizeAddOnIds(
+        bookingData.addOnIds || bookingData.bookedAddOns
+    );
 
     return {
         serviceId: currentServiceId || bookingData.serviceId || null,
@@ -215,11 +225,11 @@ function buildBookingRequestPayload(bookingData, fallbackTraceId) {
         slotF1,
         slotF2,
         resourceId: _safeTrim(bookingData.resourceId || "") || null,
-        bookedAddOns: normalizeBookedAddOns(bookingData.bookedAddOns),
-        email: _safeTrim(bookingData.email || ""),
-        firstName: _safeTrim(bookingData.firstName || ""),
-        lastName: _safeTrim(bookingData.lastName || ""),
-        phone: _safeTrim(bookingData.phone || ""),
+        addOnIds,
+        email: _safeTrim(bookingData.email || contact.email || ""),
+        firstName: _safeTrim(bookingData.firstName || contact.firstName || contact.nombre || ""),
+        lastName: _safeTrim(bookingData.lastName || contact.lastName || ""),
+        phone: _safeTrim(bookingData.phone || contact.phone || contact.telefono || ""),
         paymentMethod: _safeTrim(bookingData.paymentMethod || "") || null,
         rgpdConsent: bookingData.rgpdConsent === true,
         pairToken: _safeTrim(bookingData.pairToken || "") || null,
@@ -278,11 +288,16 @@ async function handleBooking(message, reply, traceId) {
             bookingResult.data &&
             bookingResult.data.bookingId
         ) {
+            if (bookingResult.data.requiresPayment && bookingResult.data.checkoutUrl) {
+                wixLocation.to(bookingResult.data.checkoutUrl);
+                return;
+            }
             try {
                 await wixWindowFrontend.openLightbox(
                     "ConfirmacionReserva",
                     {
                         booking: bookingResult.data || null,
+                        bookingId: bookingResult.data.bookingId,
                         service: currentService,
                         traceId
                     }
@@ -324,7 +339,7 @@ $w.onReady(async () => {
     currentServiceId = resolved.serviceId;
     currentSlug = resolved.slug;
 
-    const widget = $w("#htmlWidgetCalendario");
+    const widget = $w("#html1");
 
     if (
         !widget ||
