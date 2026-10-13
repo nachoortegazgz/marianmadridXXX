@@ -422,8 +422,23 @@ export function getUtcDateFromMadridLocal(value) {
     if (Number.isNaN(naive.getTime())) return null;
     // naive = hora civil de Madrid leida como si fuera UTC. Se corrige con el
     // desplazamiento real de Madrid en ese instante (CET/CEST).
-    const offsetMinutes = madridOffsetMinutes(naive);
-    return new Date(naive.getTime() - offsetMinutes * MS_PER_MINUTE);
+    // FIX BUG-07 (auditoria reservas): two-pass con convergencia estable.
+    // El primer offset se calcula sobre `naive`; cuando la hora civil cae
+    // cerca de una transicion DST, el instante real tiene otro desplazamiento
+    // y la conversion quedaba desfasada 1h. La segunda pasada usa el offset
+    // del instante candidato; solo se acepta si es un punto fijo (offset
+    // estable), para no re-introducir el desfase en horas ambiguas del salto
+    // de octubre (donde naive->utc cambia de rama CET/CEST en cada pasada).
+    const offsetNaive = madridOffsetMinutes(naive);
+    const firstPass = new Date(naive.getTime() - offsetNaive * MS_PER_MINUTE);
+    let utc = firstPass;
+    if (!Number.isNaN(firstPass.getTime())) {
+        const offsetRefined = madridOffsetMinutes(firstPass);
+        if (offsetRefined === offsetNaive) {
+            utc = new Date(naive.getTime() - offsetRefined * MS_PER_MINUTE);
+        }
+    }
+    return utc;
 }
 
 function parseDate(value) {

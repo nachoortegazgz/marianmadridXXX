@@ -22,6 +22,14 @@ export const BACKEND_DIR = path.resolve(__dirname, '..');
 // Mock registry (mutable so tests can seed data / inspect calls)
 // ---------------------------------------------------------------------------
 
+export const harnessConfig = {
+  // Generic stub returns "mock-secret" for every secret by default. Suites
+  // that need real secret semantics (e.g. POS fiscal key >= 32 chars) set
+  // this map before importing the module under test.
+  secrets: new Map(),        // secretName -> string value
+  currentMember: null,       // object {_id, loginEmail} or null
+};
+
 export const wixDataMock = {
   _store: new Map(),          // collectionName -> array of items
   _calls: [],                 // audit trail of operations
@@ -106,10 +114,30 @@ export const wixDataMock = {
   insert: async (collection, item) => {
     wixDataMock._calls.push({ op: 'insert', collection });
     const rows = wixDataMock._store.get(collection) || [];
-    const saved = { _id: 'mock_' + (rows.length + 1), ...item };
+    // Real Velo semantics: inserting a row whose _id already exists in the
+    // collection raises WDE0123. The slot-lock mechanism (_lockSlotKeyOrFail)
+    // depends on this to detect "lock held by another owner"; a mock that
+    // silently allowed duplicates made locks always succeed.
+    if (item && item._id && rows.some((r) => r._id === item._id)) {
+      const dup = new Error('WDE0123: Item with the same _id already exists');
+      dup.name = 'DuplicatedItemError';
+      throw dup;
+    }
+    const saved = { _id: item && item._id ? item._id : 'mock_' + (rows.length + 1), ...item };
     rows.push(saved);
     wixDataMock._store.set(collection, rows);
     return saved;
+  },
+  save: async (collection, item) => {
+    // Real Velo semantics: save() upserts by _id. eventLog._getNextSequenceInternal
+    // persists the fiscal sequence doc with save(); without this method the
+    // POS ledger flow throws TypeError at runtime under test.
+    wixDataMock._calls.push({ op: 'save', collection });
+    const rows = wixDataMock._store.get(collection) || [];
+    const idx = rows.findIndex((r) => r._id === item._id);
+    if (idx >= 0) rows[idx] = item; else rows.push(item);
+    wixDataMock._store.set(collection, rows);
+    return item;
   },
   update: async (collection, item) => {
     wixDataMock._calls.push({ op: 'update', collection });
@@ -139,6 +167,7 @@ export const mocks = {
 };
 
 const GENERIC_STUB_SOURCE = `
+import { harnessConfig } from ${JSON.stringify(p2u(path.join(BACKEND_DIR, 'tests/loader.mjs')).href.replace(/\\\\/g, '/'))};
 const fnProxy = new Proxy(function () {}, {
   get: (t, p) => {
     if (p === 'then') return undefined;
@@ -161,8 +190,8 @@ export const paymentsBackend = fnProxy;
 export const transactions = fnProxy;
 export const media = fnProxy;
 export const crypto = fnProxy;
-export const members = { getCurrentMember: async () => null };
-export const secrets = { getSecretValue: async () => "mock-secret" };
+export const members = { getCurrentMember: async () => harnessConfig.currentMember };
+export const secrets = { getSecretValue: async (name) => (harnessConfig.secrets.has(name) ? harnessConfig.secrets.get(name) : "mock-secret") };
 // auth.elevate (@wix/essentials): identidad, igual que elevate (ver abajo).
 export const auth = { elevate: (fn) => fn };
 // Named SDK exports imported by backend code (offline stubs):

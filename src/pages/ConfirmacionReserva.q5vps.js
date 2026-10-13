@@ -85,7 +85,10 @@ export async function loadConfirmation() {
 
         const booking = bookingRes.data;
         $w(ELEMENT_IDS.BOOKING_ID_TEXT).text = `Reserva ${booking.bookingId}`;
-        $w(ELEMENT_IDS.SUMMARY_TEXT).text = _formatSummary(booking);
+        // AUDIT-BUG-24 (v11.6): la confirmacion diferencia reserva y pago.
+        const estadoNota = _formatEstadoPago(booking);
+        $w(ELEMENT_IDS.SUMMARY_TEXT).text =
+            (_formatSummary(booking) + (estadoNota ? `\n${estadoNota}` : '')).trim();
 
         const movRes = await getMovimientoCajaByBooking(booking.bookingId);
 
@@ -139,6 +142,34 @@ export function renderVerifactuReceipt(movimiento) {
 
 function _safeTrim(value) {
     return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * AUDIT-BUG-24 (v11.6): nota de estado que separa la confirmacion de la cita
+ * del estado del pago. Basada en bookingStatus/paymentStatus canonicos
+ * (BOOKING_STATUS.PENDING_PAYMENT / PAYMENT_STATUS.PENDING_PAYMENT del SSOT).
+ */
+function _formatEstadoPago(booking) {
+    const bookingStatus = _safeTrim(
+        (booking && (booking.bookingStatus || booking.status)) || ''
+    ).toUpperCase();
+    const paymentStatus = _safeTrim(
+        (booking && booking.paymentStatus) || ''
+    ).toUpperCase();
+
+    if (paymentStatus === 'PENDING_PAYMENT' || bookingStatus === 'PENDING_PAYMENT') {
+        return 'Cita creada - pago pendiente. Recibiras el enlace de pago por email.';
+    }
+    if (paymentStatus === 'PAYMENT_FAILED' || paymentStatus === 'FAILED') {
+        return 'No se completo el pago. La cita puede liberarse si no se paga.';
+    }
+    if (paymentStatus === 'PAID') {
+        return 'Cita confirmada - pago recibido.';
+    }
+    if (bookingStatus === 'CONFIRMED') {
+        return 'Cita confirmada - pago presencial en el salon.';
+    }
+    return '';
 }
 
 function _formatSummary(booking) {

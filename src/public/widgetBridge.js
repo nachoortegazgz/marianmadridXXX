@@ -312,9 +312,15 @@ export function createWidgetBridge(widgetElement, options = {}) {
     const settings = safeObject(options);
 
     instanceCounter += 1;
+    // BUG-22 (auditoria reservas): entropy criptografica cuando exista
+    // crypto.randomUUID(); Math.random() queda solo como fallback cosmético
+    // para navegadores sin WebCrypto (bridgeId no es credencial de seguridad).
+    const bridgeEntropy =
+        (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function")
+            ? crypto.randomUUID().slice(0, 8)
+            : Math.random().toString(36).slice(2, 8);
     const bridgeId =
-        "wbridge-" + instanceCounter.toString(36) + "-" +
-        Math.random().toString(36).slice(2, 8);
+        "wbridge-" + instanceCounter.toString(36) + "-" + bridgeEntropy;
 
     const originPolicy = resolveOriginPolicy(settings);
 
