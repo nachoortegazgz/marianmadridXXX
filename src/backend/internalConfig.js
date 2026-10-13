@@ -1,20 +1,42 @@
 /*
 =============================================================================
 MODULE: backend/internalConfig.js
-VERSION: v5009-FISCAL-V20.1
-BASE: v5008.6-FISCAL + Directriz V20 (IDs nativa en ingles) + SSOT V20.1
+VERSION: v20.2-ALIGNED
+BASE: v5009-FISCAL-V20.1 + alineacion consumidores de reservas
 RESPONSIBILITY: Single Source of Truth (SSOT) for backend configuration.
 STANDARDS: G10 ASCII Strict.
 
-FIXES APLICADOS v5009-FISCAL-V20.1:
-  - V20-01: constantes JS renombradas a ingles para alinear con CMS field IDs.
-  - V20-02: CITA_FIELDS.STATUS_PAGO -> BOOKING_FIELDS.PAYMENT_STATUS.
-  - V20-03: aliases deprecated al final para compatibilidad de imports.
-  - V20-04: COMPUTER_SYSTEM consolida configuracion del sistema informatico
-            con keys en ingles.
-  - V20-05: ACCOUNTING_ACCOUNT keys renombradas a ingles.
-  - Herencia v5008.6: FIX-24, FIX-40, FIX-41, I-01..I-03, FIX-FISCAL-02,
-    FIX-FISCAL-04, TIPO_MOVIMIENTO.SERVICIO_PROFESIONAL.
+FIXES APLICADOS v20.2-ALIGNED:
+  - V20-06: BUSINESS_COLLECTIONS exportado como alias canonico de COLLECTIONS.
+            Los 4 modulos de reservas (bookingSaga, bookingCore, citasManager,
+            reservas.web) lo importan por nombre.
+  - V20-07: OPERATIONAL_COLLECTIONS exportado. Define CONTROL_OPERATIVO,
+            unica coleccion operativa consumida por locks y transacciones
+            idempotentes. Sustituye a SlotLocks y BookingTransactions
+            (absorcion ADR-05).
+  - V20-08: CONTROL_TYPE, BOOKING_TYPE, CHANNEL_TYPE, COMPENSATION_KIND,
+            COMPENSATION_STATUS exportados. Eran importados por bookingSaga
+            y bookingCore sin existir.
+  - V20-09: BOOKING_STATUS ampliado con PENDING y DECLINED. Consumidos por
+            bookingSaga (NON_CANCELABLE_STATUSES) y reservas.web (DTO de
+            confirmacion). Sin ellos la comparacion caia a undefined.
+  - V20-10: PAYMENT_STATUS ampliado con UNDEFINED, PARTIAL y EXEMPT.
+            Consumidos por bookingCore en los mapas de traduccion.
+  - V20-11: SLOT_SEARCH alineado a los nombres canonicos en espanol que
+            consumen mmUtils (espejo frontend) y los 4 modulos de reservas.
+            Eliminados TOLERANCE_MINUTES y MAX_DUAL_GAP_MINUTES que nadie
+            leia y que provocaban fallbacks silenciosos.
+  - V20-12: BOOKING_FIELDS.STATUS corregido a "bookingStatus" (field key
+            fisico real de CitasF2). Añadidos SLOT_START y SLOT_END,
+            campos fisicos que bookingCore._persistBooking escribe.
+  - V20-13: CITAS_BOOKING_STATUS y CITAS_PAYMENT_STATUS exportados.
+            Contrato de persistencia de CitasF2 consumido por bookingCore.
+  - V20-14: normalizeBookingType e isDualBookingType exportados como
+            helpers puros sobre BOOKING_TYPE. Consumidos por bookingCore.
+
+HERENCIA v5009-FISCAL-V20.1:
+  - V20-01..V20-05: constantes JS en ingles, BOOKING_FIELDS.PAYMENT_STATUS,
+                    aliases deprecated, COMPUTER_SYSTEM, ACCOUNTING_ACCOUNT.
 =============================================================================
 */
 
@@ -68,6 +90,21 @@ export const COLLECTIONS = Object.freeze({
     REGISTROS_HORARIOS_STAFF: "RegistrosHorariosStaff",
     SERVICIOS_CATALOGO: "ServiciosCatalogo",
     SLOT_LOCKS: "SlotLocks",
+});
+
+/**
+ * V20-06: alias canonico de COLLECTIONS. Los 4 modulos de reservas lo
+ * importan por este nombre. Contrato publico desde v5009.
+ */
+export const BUSINESS_COLLECTIONS = COLLECTIONS;
+
+/**
+ * V20-07: colecciones operativas. ControlOperativo es el unico destino
+ * de locks (SLOT_LOCK), transacciones (IDEMPOTENCY) y flags de sistema
+ * (SYSTEM_FLAG) desde ADR-05. Absorbe SlotLocks y BookingTransactions.
+ */
+export const OPERATIONAL_COLLECTIONS = Object.freeze({
+    CONTROL_OPERATIVO: "ControlOperativo",
 });
 
 // =============================================================================
@@ -197,6 +234,8 @@ export const SDK_CONFIG = Object.freeze({
 // =============================================================================
 
 export const CONCURRENCY = Object.freeze({
+    MS_TTL_MUTEX: 300000,
+    MS_LATIDO: 15000,
     MUTEX_TTL_MS: 300000,
     HEARTBEAT_MS: 15000,
     TRANSACTION_POLL_BASE_MS: 250,
@@ -263,20 +302,39 @@ export const CASH_REGISTER_STATUS = Object.freeze({
     CLOSED: "CERRADA",
 });
 
+/**
+ * V20-09: BOOKING_STATUS ampliado con PENDING y DECLINED.
+ * PENDING: estado de confirmacion pendiente. Consumido por reservas.web
+ *          (DTO de confirmacion) y bookingSaga (fallback de enum).
+ * DECLINED: estado terminal en Wix Bookings. Consumido por bookingSaga
+ *           NON_CANCELABLE_STATUSES.
+ */
 export const BOOKING_STATUS = Object.freeze({
+    PENDING: "PENDING",
     CONFIRMED: "CONFIRMED",
     PENDING_PAYMENT: "PENDING_PAYMENT",
     CANCELLED: "CANCELLED",
-    CANCELED: "CANCELLED", // Alias deprecated para compatibilidad SSOT v5008.6
+    CANCELED: "CANCELLED",
+    DECLINED: "DECLINED",
     REFUNDED: "REFUNDED",
 });
 
+/**
+ * V20-10: PAYMENT_STATUS ampliado con UNDEFINED, PARTIAL y EXEMPT.
+ * UNDEFINED y EXEMPT: enums nativos de Wix Bookings.
+ * PARTIAL: estado canonico de pago parcial. Consumido por bookingCore en
+ *          WIX_TO_CMS_PAYMENT_STATUS.
+ */
 export const PAYMENT_STATUS = Object.freeze({
+    UNDEFINED: "UNDEFINED",
     UNPAID: "UNPAID",
     NOT_PAID: "NOT_PAID",
     PENDING_PAYMENT: "PENDING_PAYMENT",
     PENDING_LEDGER: "PENDING_LEDGER",
     PAID: "PAID",
+    PARTIAL: "PARTIAL",
+    PARTIALLY_PAID: "PARTIALLY_PAID",
+    EXEMPT: "EXEMPT",
     REFUNDED: "REFUNDED",
     PARTIALLY_REFUNDED: "PARTIALLY_REFUNDED",
 });
@@ -285,6 +343,57 @@ export const COLLABORATOR_ROLES = Object.freeze({
     ADMIN: "ADMIN",
     GESTION: "GESTION",
     ESTILISTA: "ESTILISTA",
+});
+
+/**
+ * V20-08: tipos de control en ControlOperativo. Discriminador de locks,
+ * transacciones idempotentes y flags de sistema.
+ */
+export const CONTROL_TYPE = Object.freeze({
+    SLOT_LOCK: "SLOT_LOCK",
+    IDEMPOTENCY: "IDEMPOTENCY",
+    SYSTEM_FLAG: "SYSTEM_FLAG",
+});
+
+/**
+ * V20-08: tipos de booking. Contrato BIBLIA 3.6:
+ *   Reserva dual = DOS createBooking independientes (DUAL_F1 + DUAL_F2)
+ *   unidos por pairToken. Multiservice Booking PROHIBIDO.
+ */
+export const BOOKING_TYPE = Object.freeze({
+    SIMPLE: "SIMPLE",
+    DUAL_F1: "DUAL_F1",
+    DUAL_F2: "DUAL_F2",
+});
+
+/**
+ * V20-08: discriminador de canal de pago. ONLINE corresponde al
+ * selectedPaymentOption nativo de Wix Bookings Writer V2.
+ */
+export const CHANNEL_TYPE = Object.freeze({
+    ONLINE: "ONLINE",
+    PRESENCIAL: "PRESENCIAL",
+});
+
+/**
+ * V20-08: tipos de compensacion en ControlOperativo. Consumido por
+ * bookingSaga._compensateCreatedBookings.
+ */
+export const COMPENSATION_KIND = Object.freeze({
+    CANCEL_BOOKING: "CANCEL_BOOKING",
+    REFUND_LEDGER: "REFUND_LEDGER",
+    RECONCILE_CITAS: "RECONCILE_CITAS",
+});
+
+/**
+ * V20-08: estados de compensacion. PENDING es el estado inicial. Los
+ * reintentos actualizan attempts y lastError dentro del payloadJson.
+ */
+export const COMPENSATION_STATUS = Object.freeze({
+    PENDING: "PENDING",
+    PROCESSING: "PROCESSING",
+    COMPLETED: "COMPLETED",
+    FAILED: "FAILED",
 });
 
 // =============================================================================
@@ -304,10 +413,15 @@ export const CATALOG_CONFIG = Object.freeze({
     MAX_DURATION_MINUTES: 1440,
 });
 
+/**
+ * V20-11: SLOT_SEARCH con nombres canonicos en espanol, coherentes con el
+ * espejo frontend mmUtils y con los 4 modulos de reservas. Eliminados
+ * TOLERANCE_MINUTES y MAX_DUAL_GAP_MINUTES que nadie leia.
+ */
 export const SLOT_SEARCH = Object.freeze({
     DIAS_LIMITE: 14,
-    TOLERANCE_MINUTES: 10,
-    MAX_DUAL_GAP_MINUTES: 120,
+    MINUTOS_TOLERANCIA: 10,
+    MINUTOS_MAX_HUECO_DUAL: 120,
 });
 
 export const BOOKINGS_ADDON_CONFIG = Object.freeze({
@@ -325,17 +439,24 @@ export const JWT = Object.freeze({
 });
 
 // =============================================================================
-// BLOQUE 11 - CAMPOS DE CITA
+// BLOQUE 11 - CAMPOS DE CITA (CitasF2)
 // =============================================================================
 
+/**
+ * V20-12: BOOKING_FIELDS.STATUS corregido a "bookingStatus" (field key
+ * fisico real de CitasF2). Añadidos SLOT_START y SLOT_END, campos que
+ * bookingCore._persistBooking escribe.
+ */
 export const BOOKING_FIELDS = Object.freeze({
-    STATUS: "status",
+    STATUS: "bookingStatus",
     PAYMENT_STATUS: "paymentStatus",
     PAIR_TOKEN: "pairToken",
     SERVICE_ID: "serviceId",
     RESOURCE_ID: "resourceId",
     BOOKING_ID: "bookingId",
     DATE_YMD: "dateYmd",
+    SLOT_START: "slotStart",
+    SLOT_END: "slotEnd",
     META: "meta",
 });
 
@@ -383,6 +504,63 @@ export function validateActiveNativeAddonIds() {
         isEmpty: ids.length === 0,
     };
 }
+
+// =============================================================================
+// BLOQUE 14-bis - HELPERS DE BOOKING_TYPE (V20-14)
+// =============================================================================
+
+const _VALID_BOOKING_TYPES = Object.freeze([
+    BOOKING_TYPE.SIMPLE,
+    BOOKING_TYPE.DUAL_F1,
+    BOOKING_TYPE.DUAL_F2,
+]);
+
+/**
+ * Normaliza un valor de bookingType al enum canonico. Fallback SIMPLE
+ * ante valor desconocido o vacio. Nunca lanza: el llamante decide si el
+ * fallback es aceptable.
+ */
+export function normalizeBookingType(value) {
+    const v = String(value || "").trim().toUpperCase();
+    return _VALID_BOOKING_TYPES.indexOf(v) >= 0 ? v : BOOKING_TYPE.SIMPLE;
+}
+
+/**
+ * Determina si un bookingType pertenece a una reserva dual (F1 o F2).
+ * Contrato BIBLIA 3.6: ambas fases exigen pairToken no vacio.
+ */
+export function isDualBookingType(value) {
+    const v = String(value || "").trim().toUpperCase();
+    return v === BOOKING_TYPE.DUAL_F1 || v === BOOKING_TYPE.DUAL_F2;
+}
+
+// =============================================================================
+// BLOQUE 14-ter - CONTRATO DE PERSISTENCIA EN CitasF2 (V20-13)
+// =============================================================================
+
+/**
+ * V20-13: enums canonicos de CitasF2 (campo fisico bookingStatus).
+ * Consumidos por bookingCore en las tablas de traduccion Wix <-> CMS.
+ * Cualquier valor fuera de este enum lanza assertValidEnum en bookingCore.
+ */
+export const CITAS_BOOKING_STATUS = Object.freeze({
+    PENDING: "PENDING",
+    CONFIRMED: "CONFIRMED",
+    COMPLETED: "COMPLETED",
+    CANCELLED: "CANCELLED",
+    NO_SHOW: "NO_SHOW",
+});
+
+/**
+ * V20-13: enums canonicos de CitasF2 (campo fisico paymentStatus).
+ * Consumidos por bookingCore en las tablas de traduccion Wix <-> CMS.
+ */
+export const CITAS_PAYMENT_STATUS = Object.freeze({
+    UNPAID: "UNPAID",
+    PAID: "PAID",
+    PARTIAL: "PARTIAL",
+    REFUNDED: "REFUNDED",
+});
 
 // =============================================================================
 // BLOQUE 15 - CUENTAS PGC (Plan General Contable)
@@ -545,9 +723,9 @@ export const COMPUTER_SYSTEM = Object.freeze({
 // =============================================================================
 // BLOQUE 27 - ALIASES DEPRECATED
 //
-// Mantienen compatibilidad con consumidores que aun importan los nombres
-// antiguos. Se eliminaran en v5010 tras migracion completa de todos los
-// modulos backend.
+// Mantienen compatibilidad con consumidores no verificados en este pase
+// (crons, fiscalAggregator, tests historicos). EOL 31/12/2026. Cualquier
+// consumidor nuevo debe importar los nombres canonicos.
 // =============================================================================
 
 /** @deprecated Usar TIMECLOCK_TYPE */
