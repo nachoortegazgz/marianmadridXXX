@@ -2,42 +2,44 @@
  * ============================================================================
  * FILE: backend/reservas.web.js
  * VERSION: v5011-ALIGNED
- * BASE: v5009-FISCAL-V20.1 + alineacion CMS + DAL canonico + DTO widget
+ * BASE: v5009-FISCAL-V20.1 + DAL canonico + DTO alineado CMS/widget
  * RESPONSIBILITY: Availability engine, dual slots, staff pairing and caching.
  * STANDARDS: G10 ASCII Strict.
  *
  * FIXES APLICADOS v5011-ALIGNED:
- *  - ALIGN-01: import de colecciones migrado a COLLECTIONS (el export
- *              BUSINESS_COLLECTIONS no existe en internalConfig).
- *  - ALIGN-02: migrado de wix-data legacy a backend/dataAccess (DAL canonico
- *              con queryFirstItem, queryItems, CONSISTENCY y elevacion
- *              implicita). Cero suppressAuth en codigo de dominio.
- *  - ALIGN-03: BOOKING_STATUS.PENDING no existe en internalConfig. El DTO
- *              de confirmacion admite CONFIRMED y PENDING_PAYMENT.
- *  - ALIGN-04: SLOT_SEARCH leido por nombre canonico con fallback tolerante
- *              (MAX_DUAL_GAP_MINUTES) sin romper si el SSOT aun usa el
- *              nombre en espanol.
+ *  - ALIGN-01: import de colecciones migrado a COLLECTIONS. BUSINESS_COLLECTIONS
+ *              se mantiene como alias pero COLLECTIONS es el nombre canonico.
+ *  - ALIGN-02: migrado de wix-data legacy a backend/dataAccess (DAL canonico:
+ *              queryFirstItem, queryItems, CONSISTENCY). Cero suppressAuth en
+ *              codigo de dominio: el DAL eleva por diseno.
+ *  - ALIGN-03: BOOKING_STATUS.PENDING ya existe en internalConfig v20.2;
+ *              DTO de confirmacion admite CONFIRMED, PENDING o PENDING_PAYMENT.
+ *  - ALIGN-04: SLOT_SEARCH leido por nombre canonico MINUTOS_MAX_HUECO_DUAL
+ *              (ya presente en internalConfig v20.2).
  *  - ALIGN-05: _mapServiceImport2ToUX expone title, description,
  *              shortDescription, price, location a nivel RAIZ del DTO
  *              (ademas de metadata, que se conserva por compatibilidad).
- *  - ALIGN-06: staffOptions incluye resourceId ademas de id/value/name.
- *  - ALIGN-07: addOnOptions se resuelve consultando ComplementosCatalogo
- *              a partir del campo multi-reference ServiciosCatalogo.name
- *              (que apunta a ComplementosCatalogo.addonId).
- *  - ALIGN-08: _normalizeAddon eliminado. Se sustituye por el DTO directo
- *              desde ComplementosCatalogo (addonId, name, price, description,
+ *  - ALIGN-06: staffOptions incluye resourceId y staffMemberId ademas de
+ *              id/value/name/label. El widget HTML consume resourceId.
+ *  - ALIGN-07: addOnOptions se resuelve consultando ComplementosCatalogo a
+ *              partir del campo multi-reference ServiciosCatalogo.name
+ *              (que devuelve GUIDs que coinciden con ComplementosCatalogo.addonId).
+ *  - ALIGN-08: _normalizeAddon eliminado; se sustituye por el DTO directo
+ *              de ComplementosCatalogo (addOnId, name, price, description,
  *              durationMinutes, taxIncluded, tipoImpositivo, sku).
- *  - ALIGN-09: confirmacion lee bookingStatus (campo fisico canonico de
- *              CitasF2) en lugar de BOOKING_FIELDS.STATUS.
+ *  - ALIGN-09: _normalizeSlotShape y _getResourceIdsFromSlot delegan en
+ *              bookingUtils.normalizeSlotShape y getResourceIdsFromSlot.
+ *              Cero duplicacion de primitivas (BIBLIA 0.5.1).
+ *  - ALIGN-10: getConfirmedBookingForDisplay lee bookingStatus (field key
+ *              canonico de CitasF2) y filtra por BOOKING_FIELDS.BOOKING_ID.
  *
- * FIXES APLICADOS v5009-FISCAL-V20.1 (heredados):
+ * FIXES HEREDADOS v5009-FISCAL-V20.1:
  *  - V20-01: import ESTADO_CITA -> BOOKING_STATUS.
  *  - V20-02: uso de BOOKING_STATUS.CANCELED en _countStaffLoadForDay.
  *  - V20-03: resto del modulo sin cambios funcionales.
  *
- * FIXES APLICADOS v5008.13 (heredados):
- *  - FIX-DOC-BALANCE-A/B/C.
- *  - FIX-21..24, FIX-30, FIX-R1, FIX-R2.
+ * FIXES HEREDADOS v5008.13:
+ *  - FIX-DOC-BALANCE-A/B/C, FIX-21..24, FIX-30, FIX-R1, FIX-R2.
  * ============================================================================
  */
 
@@ -78,12 +80,13 @@ import {
     resolveLinkedPhase2Duration,
     computeGapMinutes,
     toUtcRange,
-    pickStaffByLowestLoad
+    pickStaffByLowestLoad,
+    normalizeSlotShape,
+    getResourceIdsFromSlot
 } from "backend/booking/bookingUtils";
 
 import { logger } from "backend/logger";
 import { getStaffDisplayName } from "backend/staff";
-import { normalizeBookingStatus } from "backend/validation";
 
 const log = logger;
 
@@ -98,18 +101,10 @@ const CITAS_COL = COLLECTIONS.CITAS_F2;
 const WATCHDOG_TIMEOUT_MS = SDK_CONFIG.TIMEOUTS.WATCHDOG_MS;
 const SERVICE_CACHE_TTL_MS = SDK_CONFIG.CACHE.SERVICES_TTL_MS;
 const DIAS_LIMITE = SLOT_SEARCH.DIAS_LIMITE;
-
-// ALIGN-04: lectura tolerante del maximo gap dual.
-// Acepta el nombre V20 en espanol (MINUTOS_MAX_HUECO_DUAL) o el ingles
-// (MAX_DUAL_GAP_MINUTES). Fallback 120.
 const MINUTOS_MAX_HUECO_DUAL = Math.max(
     0,
-    Number(
-        SLOT_SEARCH?.MINUTOS_MAX_HUECO_DUAL ??
-        SLOT_SEARCH?.MAX_DUAL_GAP_MINUTES
-    ) || 120
+    Number(SLOT_SEARCH?.MINUTOS_MAX_HUECO_DUAL) || 120
 );
-
 const CACHE_MAX_SIZE = SDK_CONFIG.CACHE.MAX_ENTRIES;
 const STAFF_RESOURCE_TYPE_ID = API.STAFF_RESOURCE_TYPE_ID;
 const STAFF_LOAD_QUERY_LIMIT = Math.max(
@@ -149,16 +144,17 @@ function _toPublicError(err, fallbackCode = "INTERNAL_ERROR", fallbackMessage = 
     };
 }
 
+// ALIGN-09: delegacion en bookingUtils. Cero duplicacion.
 function _normalizeSlotShape(slot) {
-    if (!slot || typeof slot !== "object") return null;
-    if (slot.slot && typeof slot.slot === "object") {
-        return { ...slot.slot, ...slot };
-    }
-    return slot;
+    return normalizeSlotShape(slot);
+}
+
+function _getResourceIdsFromSlot(slot) {
+    return getResourceIdsFromSlot(slot, STAFF_RESOURCE_TYPE_ID);
 }
 
 function _attachServiceId(slot, forcedServiceId, traceId, ctx) {
-    const normalizedSlot = _normalizeSlotShape(slot);
+    const normalizedSlot = normalizeSlotShape(slot);
     if (!normalizedSlot) return null;
     const serviceId = _safeTrim(forcedServiceId);
     if (!serviceId || !_looksLikeGuid(serviceId)) {
@@ -206,47 +202,6 @@ function _normalizeResourceIds(resourceId, traceId) {
     return [];
 }
 
-function _getResourceIdsFromSlot(slot) {
-    const normalizedSlot = _normalizeSlotShape(slot);
-    if (!normalizedSlot || typeof normalizedSlot !== "object") return [];
-
-    let groups = [];
-    if (Array.isArray(normalizedSlot.availableResources)) {
-        groups = normalizedSlot.availableResources;
-    } else if (
-        normalizedSlot.slot &&
-        typeof normalizedSlot.slot === "object" &&
-        Array.isArray(normalizedSlot.slot.availableResources)
-    ) {
-        groups = normalizedSlot.slot.availableResources;
-    }
-
-    if (groups.length > 0) {
-        const staffGroup = groups.find(
-            (group) =>
-                String(group?.resourceTypeId) === String(STAFF_RESOURCE_TYPE_ID)
-        );
-        if (!staffGroup) return [];
-        return Array.from(
-            new Set(
-                (staffGroup.resources || [])
-                    .map((resource) =>
-                        _safeTrim(resource?.id || resource?._id || resource?.resourceId)
-                    )
-                    .filter((resourceId) => _looksLikeGuid(resourceId))
-            )
-        );
-    }
-
-    const directId = _safeTrim(
-        normalizedSlot.resource?.id ||
-        normalizedSlot.resource?._id ||
-        normalizedSlot.resource?.resourceId ||
-        normalizedSlot.resourceId
-    );
-    return _looksLikeGuid(directId) ? [directId] : [];
-}
-
 function _minutesBetweenUtcDates(a, b) {
     if (!(a instanceof Date) || !(b instanceof Date)) return 0;
     const milliseconds = b.getTime() - a.getTime();
@@ -268,6 +223,67 @@ async function _getStaffDisplayNamePublic(staffId) {
         return _safeTrim(name) || STAFF_DEFAULT_NAME;
     } catch (_) {
         return STAFF_DEFAULT_NAME;
+    }
+}
+
+/**
+ * ALIGN-07: resuelve el DTO de add-ons consultando ComplementosCatalogo.
+ *
+ * El campo ServiciosCatalogo.name es MULTI_REFERENCE a ComplementosCatalogo
+ * (devuelve un array de GUIDs que coinciden con ComplementosCatalogo.addonId).
+ * Este helper:
+ *   1. limpia y deduplica los GUIDs recibidos,
+ *   2. consulta ComplementosCatalogo con $in sobre addonId,
+ *   3. devuelve el DTO canonico que consume el widget:
+ *        [{ addOnId, name, price, description, durationMinutes,
+ *           taxIncluded, tipoImpositivo, sku }]
+ *
+ * Preserva el orden original de service.name.
+ * Devuelve [] si no hay add-ons o si la consulta falla.
+ */
+async function _loadAddOnOptions(serviceNameFieldValue, traceId) {
+    const addOnIds = cleanGuidList(serviceNameFieldValue);
+    if (addOnIds.length === 0) return [];
+
+    try {
+        const result = await withTimeout(
+            () =>
+                queryItems({
+                    dataCollectionId: COMPLEMENTOS_COL,
+                    filter: { addonId: { $in: addOnIds } },
+                    limit: Math.max(1, addOnIds.length),
+                    consistency: CONSISTENCY.STRONG
+                }),
+            WATCHDOG_TIMEOUT_MS,
+            "loadAddOnOptions"
+        );
+
+        const items = Array.isArray(result?.items) ? result.items : [];
+
+        const byId = new Map(
+            items.map((item) => [_safeTrim(item.addonId), item])
+        );
+
+        return addOnIds
+            .map((id) => byId.get(id))
+            .filter(Boolean)
+            .map((item) => ({
+                addOnId: _safeTrim(item.addonId),
+                name: _safeTrim(item.name),
+                price: Number(item.price) || 0,
+                description: _safeTrim(item.description) || null,
+                durationMinutes: Number(item.durationMinutes) || 0,
+                taxIncluded: item.taxIncluded === true,
+                tipoImpositivo: Number(item.tipoImpositivo) || 0,
+                sku: _safeTrim(item.sku) || null
+            }))
+            .filter((a) => _looksLikeGuid(a.addOnId) && a.name);
+    } catch (error) {
+        log.warn("_loadAddOnOptions failed", {
+            traceId,
+            error: error?.message
+        });
+        return [];
     }
 }
 
@@ -345,66 +361,6 @@ async function _verifyRequiredStaffViaGet({
             message: error?.message
         });
         return { ok: false, slot: null, errorCode: "STAFF_UNAVAILABLE" };
-    }
-}
-
-/**
- * ALIGN-07: resuelve el DTO de add-ons consultando ComplementosCatalogo.
- *
- * El campo ServiciosCatalogo.name es MULTI_REFERENCE a ComplementosCatalogo
- * (devuelve un array de GUIDs que coinciden con ComplementosCatalogo.addonId).
- * Este helper:
- *   1. limpia y deduplica los GUIDs recibidos,
- *   2. consulta ComplementosCatalogo con $in,
- *   3. devuelve el DTO canonico que consume el widget:
- *        [{ addOnId, name, price, description, durationMinutes,
- *           taxIncluded, tipoImpositivo, sku }]
- *
- * Preserva el orden original de service.name.
- */
-async function _loadAddOnOptions(serviceNameFieldValue, traceId) {
-    const addOnIds = cleanGuidList(serviceNameFieldValue);
-    if (addOnIds.length === 0) return [];
-
-    try {
-        const result = await withTimeout(
-            () =>
-                queryItems({
-                    dataCollectionId: COMPLEMENTOS_COL,
-                    filter: { addonId: { $in: addOnIds } },
-                    limit: Math.max(1, addOnIds.length),
-                    consistency: CONSISTENCY.STRONG
-                }),
-            WATCHDOG_TIMEOUT_MS,
-            "loadAddOnOptions"
-        );
-
-        const items = Array.isArray(result?.items) ? result.items : [];
-
-        const byId = new Map(
-            items.map((item) => [_safeTrim(item.addonId), item])
-        );
-
-        return addOnIds
-            .map((id) => byId.get(id))
-            .filter(Boolean)
-            .map((item) => ({
-                addOnId: _safeTrim(item.addonId),
-                name: _safeTrim(item.name),
-                price: Number(item.price) || 0,
-                description: _safeTrim(item.description) || null,
-                durationMinutes: Number(item.durationMinutes) || 0,
-                taxIncluded: item.taxIncluded === true,
-                tipoImpositivo: Number(item.tipoImpositivo) || 0,
-                sku: _safeTrim(item.sku) || null
-            }))
-            .filter((a) => _looksLikeGuid(a.addOnId) && a.name);
-    } catch (error) {
-        log.warn("_loadAddOnOptions failed", {
-            traceId,
-            error: error?.message
-        });
-        return [];
     }
 }
 
@@ -588,9 +544,6 @@ export async function _mapServiceImport2ToUX(service, traceId) {
     const availableStaff = cleanGuidList(_readServiceField(service, "availableStaff"));
 
     // ALIGN-06: staffOptions con resourceId + name (contrato del widget).
-    // Nota: availableStaff es MULTI_REFERENCE a Members y devuelve
-    // staffMemberId. Si en el futuro Members y Resources divergen, la
-    // resolucion debe hacerse antes de exponer resourceId aqui.
     const staffOptions = await Promise.all(
         availableStaff.map(async (staffId) => {
             const displayName = await _getStaffDisplayNamePublic(staffId);
@@ -745,7 +698,7 @@ export function _toPublicService(service) {
 }
 
 // ============================================================================
-// CONFIRMATION PAGE READ
+// CONFIRMATION PAGE READ (SSOT-07: page code never queries CMS directly)
 // ============================================================================
 
 const _CONFIRMATION_DTO_FIELDS = Object.freeze([
@@ -765,10 +718,10 @@ function _toConfirmationDto(item) {
     for (const key of _CONFIRMATION_DTO_FIELDS) {
         if (item[key] !== undefined && item[key] !== null) dto[key] = item[key];
     }
-    // ALIGN-09: lectura canonica de bookingStatus (campo fisico de CitasF2).
-    const rawStatus = item.bookingStatus ?? item.status;
+    // ALIGN-10: lectura canonica de bookingStatus (field key de CitasF2 v20.2).
+    const rawStatus = item.bookingStatus;
     if (rawStatus !== undefined && rawStatus !== null) {
-        dto.bookingStatus = normalizeBookingStatus(rawStatus);
+        dto.bookingStatus = rawStatus;
     }
     if (item.paymentStatus !== undefined) dto.paymentStatus = item.paymentStatus;
     return dto;
@@ -787,7 +740,7 @@ export const getConfirmedBookingForDisplay = webMethod(
                 () =>
                     queryFirstItem({
                         dataCollectionId: CITAS_COL,
-                        filter: { bookingId: { $eq: cleanId } },
+                        filter: { [BOOKING_FIELDS.BOOKING_ID]: { $eq: cleanId } },
                         consistency: CONSISTENCY.STRONG
                     }),
                 Number(SDK_CONFIG?.TIMEOUTS?.API_MS) || 15000,
@@ -796,13 +749,11 @@ export const getConfirmedBookingForDisplay = webMethod(
 
             if (!item) return { ok: false, data: null, error: "NOT_FOUND" };
 
-            // ALIGN-03: solo CONFIRMED y PENDING_PAYMENT son mostrables.
-            // internalConfig.BOOKING_STATUS no declara PENDING por si solo.
-            const status = normalizeBookingStatus(item.bookingStatus ?? item.status);
+            const status = _safeTrim(item[BOOKING_FIELDS.STATUS]);
             const showable =
                 status === BOOKING_STATUS.CONFIRMED ||
-                status === BOOKING_STATUS.PENDING_PAYMENT ||
-                status === "PENDING";
+                status === BOOKING_STATUS.PENDING ||
+                status === BOOKING_STATUS.PENDING_PAYMENT;
 
             if (!showable) {
                 return { ok: false, data: null, error: "NOT_CONFIRMED" };
@@ -1052,7 +1003,7 @@ export const getAvailableDays = webMethod(
 );
 
 // ============================================================================
-// STAFF LOAD COUNTS FOR DAY
+// STAFF LOAD COUNTS FOR DAY (CITAS_F2)
 // ============================================================================
 
 async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
@@ -1085,9 +1036,9 @@ async function _countStaffLoadForDay(dateYmd, resourceIds, traceId) {
         );
 
         for (const item of result?.items || []) {
-            const rawStatus = item?.bookingStatus;
+            const rawStatus = item?.[BOOKING_FIELDS.STATUS];
             if (rawStatus === undefined || rawStatus === null) {
-                log.warn("CitasF2 fila sin bookingStatus (usa legacy status), migrar antes de EOL 31/12/2026", { id: item?._id });
+                log.warn("CitasF2 fila sin bookingStatus, revisar EOL 31/12/2026", { id: item?._id });
             }
             const status = String(rawStatus || "").trim().toUpperCase();
             if (status === cancelled || status === "CANCELED" || status === "CANCELLED") {
