@@ -137,9 +137,11 @@ async function handleNavigation(payload) {
 
 async function handleAvailability(payload, reply) {
     const action = _safeTrim(payload.action || "").toLowerCase();
-    const addOnIds = Array.isArray(payload.addOnIds)
-        ? payload.addOnIds
-        : [];
+    const addOnIds = Array.isArray(payload.bookedAddOns)
+        ? payload.bookedAddOns
+        : Array.isArray(payload.addOnIds)
+            ? payload.addOnIds
+            : [];
     let result;
 
     try {
@@ -221,9 +223,11 @@ async function handleSelection(payload, reply) {
                 currentServiceId || currentSlug,
                 start,
                 payload.resourceId || null,
-                Array.isArray(payload.addOnIds)
-                    ? payload.addOnIds
-                    : [],
+                Array.isArray(payload.bookedAddOns)
+                    ? payload.bookedAddOns
+                    : Array.isArray(payload.addOnIds)
+                        ? payload.addOnIds
+                        : [],
                 null
             ),
             UI?.FRONTEND_API_TIMEOUT_MS || 60000,
@@ -281,10 +285,10 @@ function buildBookingRequestPayload(bookingData, fallbackTraceId) {
         bookedAddOns: normalizeBookedAddOns(
             bookingData.bookedAddOns || bookingData.addOnIds
         ),
-        email: _safeTrim(bookingData.email || ""),
-        firstName: _safeTrim(bookingData.firstName || ""),
+        email: _safeTrim(bookingData.email || bookingData.cliente?.email || ""),
+        firstName: _safeTrim(bookingData.firstName || bookingData.cliente?.nombre || ""),
         lastName: _safeTrim(bookingData.lastName || ""),
-        phone: _safeTrim(bookingData.phone || ""),
+        phone: _safeTrim(bookingData.phone || bookingData.cliente?.telefono || ""),
         paymentMethod: _safeTrim(bookingData.paymentMethod || "") || null,
         channelType: _safeTrim(bookingData.channelType || "") || null,
         rgpdConsent: bookingData.rgpdConsent === true,
