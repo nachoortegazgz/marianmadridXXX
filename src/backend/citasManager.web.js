@@ -1,35 +1,35 @@
 /*
 =============================================================================
 MODULE: backend/citasManager.web.js
-VERSION: v10.0-SSOT-FRICTIONLESS
-BASE: BIBLIA SSOT v9.1 + Anexo D + dataAccess v10.0
+VERSION: v10.1-ALIGNED
+BASE: v10.0-SSOT-FRICTIONLESS + alineacion CMS + internalConfig v20.2
 RESPONSIBILITY: Booking processing, payment confirmation and rescheduling.
 STANDARDS: G10 ASCII Strict. Sin console.log directo (logger SSOT).
 
-CORRECCIONES APLICADAS (v10.0):
-  C1. DAL: migrado de backend/dataAccess.js a backend/dataAccess.js v10.0.
-      Desaparece el flag { suppressAuth: true } (R1/R5): toda operacion del
-      DAL es elevada por diseno. Lecturas de CitasF2 usan CONSISTENCY.STRONG
-      para garantizar visibilidad inmediata tras escritura.
-  C2. FILTROS: builder Velo (.eq/.limit/.find) sustituido por objeto nativo
-      SDK v2 via wql.* (R4). Cero concatenacion WQL, cero builder legacy.
-  C3. ENUM: BOOKING_TYPE.DUALF2 corregido a BOOKING_TYPE.DUAL_F2 (ADR-17
-      SNAKE_CASE). El valor anterior no existia en el enum canonico y hacia
-      fallar silenciosamente la identificacion de fases duales.
-  C4. IMPORTS: eliminada importacion dinamica de reservas.web.js dentro de
-      _loadServiceConfigForCita. Se usa la importacion estatica ya existente
-      en la cabecera del modulo (_getServiceBySlugOrIdInternal no estaba
-      importada; se anade ahora). La importacion dinamica rompia el analisis
-      estatico de dependencias y dificultaba la auditoria de seguridad.
-  C5. FRICCION: _getCitaMeta tolera meta como string JSON o como objeto.
-      Se mantiene la tolerancia porque CitasF2.meta puede venir serializado
-      desde flujos legacy anteriores a FASE1 (EOL 31/12/2026).
-  C6. ALIAS: eliminados alias de campos en _getBookingSlotFromCita y
-      _getDualSlotInput. Un unico nombre canonico por concepto.
-  C7. SEGURIDAD: confirmPayment mantiene Permissions.SiteMember. La
-      verificacion de propiedad de la reserva/orden debe implementarse en
-      _assertBookingOwner antes de desplegar pagos en produccion. Este
-      modulo NO resuelve ese punto por si solo.
+FIXES APLICADOS v10.1-ALIGNED:
+  CM-01: _getBookingSlotFromCita lee los campos fisicos reales de CitasF2
+         (slotStart / slotEnd via BOOKING_FIELDS). Antes leia startDate /
+         endDate que no existen en la coleccion: la proyeccion devolvia
+         siempre {startDate: null, endDate: null}.
+  CM-02: _getNativeAddonIdsForRevalidation renombrado a
+         _getAddOnIdsForRevalidation. Lee el campo canonico addOnIds con
+         fallback de lectura a nativeAddonIds (alias heredado del contrato
+         bookingCore._persistBooking, EOL 31/12/2026). Alinea con el enum
+         v20.2 que ya no expone nativeAddonIds como primario.
+  CM-03: COLLECTIONS como nombre canonico. BUSINESS_COLLECTIONS se mantiene
+         funcionando por alias en internalConfig v20.2, pero el modulo
+         importa el canonico.
+  CM-04: _getCitaMeta usa un unico punto de tolerancia JSON (EOL
+         31/12/2026). Sin cambios funcionales.
+  CM-05: _setCitasPaymentState no depende de BOOKING_STATUS.CONFIRMED
+         escrito a un campo inexistente: usa el value canonico del enum y
+         delega en _updateCitaSafe (bookingCore) que escribe a
+         BOOKING_FIELDS.STATUS = bookingStatus.
+
+FIXES HEREDADOS v10.0:
+  C1..C7 (DAL, filtros wql, DUAL_F2, importacion estatica, tolerancia meta,
+  aliases eliminados, aviso de seguridad de confirmPayment).
+
 DEPENDENCIAS: backend/dataAccess.js, backend/booking/bookingSaga.js,
   backend/booking/bookingCore.js, backend/cajas.web.js, backend/reservas.web.js,
   backend/security.js, backend/audit.js, backend/logger.js.
@@ -48,7 +48,7 @@ import {
 } from "backend/dataAccess";
 
 import {
-    BUSINESS_COLLECTIONS,
+    COLLECTIONS,
     SDK_CONFIG,
     APP_IDS,
     BOOKING_STATUS,
@@ -56,6 +56,7 @@ import {
     PAYMENT_METHOD,
     SLOT_SEARCH,
     BOOKING_TYPE,
+    BOOKING_FIELDS,
 } from "backend/internalConfig";
 
 import {
@@ -95,7 +96,7 @@ const log = logger;
 // BLOQUE 1 - CONSTANTES
 // =============================================================================
 
-const CITAS_COL = BUSINESS_COLLECTIONS.CITAS_F2;
+const CITAS_COL = COLLECTIONS.CITAS_F2;
 
 const API_TIMEOUT_MS = Number(SDK_CONFIG?.TIMEOUTS?.API_MS) || 15000;
 
@@ -115,7 +116,7 @@ const getOrderElevated = auth.elevate(orders.getOrder);
 // =============================================================================
 
 /**
- * C5: tolera meta como string JSON serializado (flujos legacy pre-FASE1)
+ * CM-04: tolera meta como string JSON serializado (flujos legacy pre-FASE1)
  * o como objeto plano. EOL 31/12/2026.
  */
 function _getCitaMeta(cita) {
@@ -126,9 +127,9 @@ function _getCitaMeta(cita) {
     if (typeof meta === "string") {
         try {
             const parsed = JSON.parse(meta);
-            return parsed && typeof parsed === "object" && !Array.isArray(parsed) ?
-                parsed :
-                {};
+            return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+                ? parsed
+                : {};
         } catch (_) {
             return {};
         }
@@ -141,15 +142,31 @@ function _getCitaMeta(cita) {
     return meta;
 }
 
-function _getNativeAddonIdsForRevalidation(cita) {
+/**
+ * CM-02: lee los add-ons de una cita para revalidacion.
+ *
+ * Nombre canonico: meta.addOnIds (escrito por bookingCore._persistBooking).
+ * Fallback de lectura: meta.nativeAddonIds (alias heredado del contrato
+ * bookingSaga v5010.7, EOL 31/12/2026).
+ *
+ * Devuelve solo GUIDs validos, deduplicados, ordenados.
+ */
+function _getAddOnIdsForRevalidation(cita) {
     const meta = _getCitaMeta(cita);
 
-    // C6: sin alias addOnIds; solo nativeAddonIds canonico.
-    const addOnIds = Array.isArray(meta.nativeAddonIds) ? meta.nativeAddonIds : [];
+    const source = Array.isArray(meta.addOnIds)
+        ? meta.addOnIds
+        : Array.isArray(meta.nativeAddonIds)
+            ? meta.nativeAddonIds
+            : [];
 
-    return addOnIds
-        .map((id) => _safeTrim(id))
-        .filter((id) => _looksLikeGuid(id));
+    return Array.from(
+        new Set(
+            source
+                .map((id) => _safeTrim(id))
+                .filter((id) => _looksLikeGuid(id))
+        )
+    ).sort();
 }
 
 /**
@@ -161,7 +178,7 @@ async function _findCitaByBookingId(bookingId) {
 
     return queryFirstItem({
         dataCollectionId: CITAS_COL,
-        filter: wql.eq("bookingId", normalizedId),
+        filter: wql.eq(BOOKING_FIELDS.BOOKING_ID, normalizedId),
         consistency: CONSISTENCY.STRONG,
     });
 }
@@ -175,7 +192,7 @@ async function _findCitasByPairToken(pairToken) {
 
     const result = await queryItems({
         dataCollectionId: CITAS_COL,
-        filter: wql.eq("pairToken", normalizedToken),
+        filter: wql.eq(BOOKING_FIELDS.PAIR_TOKEN, normalizedToken),
         limit: 10,
         offset: 0,
         consistency: CONSISTENCY.STRONG,
@@ -273,15 +290,15 @@ export const confirmPayment = webMethod(
 
             const orderId = _safeTrim(payload?.orderId);
 
-            const bookingIds = Array.isArray(payload?.bookingIds) ?
-                Array.from(
+            const bookingIds = Array.isArray(payload?.bookingIds)
+                ? Array.from(
                     new Set(
                         payload.bookingIds
-                        .map((id) => _safeTrim(id))
-                        .filter((id) => _looksLikeGuid(id))
+                            .map((id) => _safeTrim(id))
+                            .filter((id) => _looksLikeGuid(id))
                     )
-                ) :
-                [];
+                )
+                : [];
 
             const requestedAmount = _readPositiveAmount(payload?.amount);
 
@@ -329,7 +346,8 @@ export const confirmPayment = webMethod(
             const ledgerResult = await registerBookingPayment(
                 linkedBookingIds,
                 finalAmount,
-                PAYMENT_METHOD.ONLINE, {
+                PAYMENT_METHOD.ONLINE,
+                {
                     concept: "Online booking payment",
                     resourceId: "online",
                     traceId,
@@ -344,7 +362,8 @@ export const confirmPayment = webMethod(
                 await logAuditEvent(
                     "PAYMENT_LEDGER_FAILED",
                     "ERROR",
-                    "Payment ledger registration failed.", {
+                    "Payment ledger registration failed.",
+                    {
                         orderId,
                         traceId,
                         error: ledgerResult?.error?.message || null,
@@ -359,7 +378,8 @@ export const confirmPayment = webMethod(
                     data: null,
                     error: {
                         code: "LEDGER_FAIL",
-                        message: ledgerResult?.error?.message ||
+                        message:
+                            ledgerResult?.error?.message ||
                             "Payment registration failed.",
                     },
                 };
@@ -374,7 +394,8 @@ export const confirmPayment = webMethod(
                 await logAuditEvent(
                     "PAYMENT_LEDGER_FAILED",
                     "ERROR",
-                    "Ledger registered without cash movement reference.", { orderId, traceId, error: "LEDGER_REFERENCE_MISSING" },
+                    "Ledger registered without cash movement reference.",
+                    { orderId, traceId, error: "LEDGER_REFERENCE_MISSING" },
                     traceId,
                     orderId,
                     AUDIT_SOURCE
@@ -385,7 +406,8 @@ export const confirmPayment = webMethod(
                     data: null,
                     error: {
                         code: "LEDGER_REFERENCE_MISSING",
-                        message: "Payment could not be confirmed: ledger reference missing.",
+                        message:
+                            "Payment could not be confirmed: ledger reference missing.",
                     },
                 };
             }
@@ -401,7 +423,8 @@ export const confirmPayment = webMethod(
             await logAuditEvent(
                 "PAYMENT_CONFIRMED",
                 "INFO",
-                "Booking payment confirmed.", {
+                "Booking payment confirmed.",
+                {
                     orderId,
                     bookingIds,
                     amount: finalAmount,
@@ -456,9 +479,11 @@ async function _getValidatedPaidOrder(
     const normalizedOrderId = _safeTrim(orderId);
 
     if (!normalizedOrderId) {
-        throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "orderId is required", {
-            traceId,
-        });
+        throw createBookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "orderId is required",
+            { traceId }
+        );
     }
 
     let order;
@@ -470,46 +495,48 @@ async function _getValidatedPaidOrder(
             "getOrder"
         );
     } catch (error) {
-        throw createBookingError(ERROR_CODES.DATABASE_ERROR, "Failed to fetch order.", {
-            traceId,
-            cause: error?.message,
-        });
+        throw createBookingError(
+            ERROR_CODES.DATABASE_ERROR,
+            "Failed to fetch order.",
+            { traceId, cause: error?.message }
+        );
     }
 
     if (!order) {
-        throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Order not found", {
-            traceId,
-        });
+        throw createBookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "Order not found",
+            { traceId }
+        );
     }
 
     const paymentStatus = String(order?.paymentStatus || "").toUpperCase();
 
     if (!_isPaidOrderStatus(paymentStatus)) {
-        throw createBookingError(ERROR_CODES.INVALID_PAYLOAD, "Order is not paid.", {
-            traceId,
-            paymentStatus,
-        });
+        throw createBookingError(
+            ERROR_CODES.INVALID_PAYLOAD,
+            "Order is not paid.",
+            { traceId, paymentStatus }
+        );
     }
 
     const bookingLineItems = _getOrderBookingLineItems(order);
 
     const orderBookingIds = bookingLineItems
-        .map((item) =>
-            String(item?.catalogReference?.catalogItemId || "")
-        )
+        .map((item) => String(item?.catalogReference?.catalogItemId || ""))
         .filter(Boolean);
 
     for (const bookingId of bookingIds) {
         if (!orderBookingIds.includes(String(bookingId))) {
             throw createBookingError(
                 ERROR_CODES.INVALID_PAYLOAD,
-                "Booking is not included in the order.", { traceId, bookingId }
+                "Booking is not included in the order.",
+                { traceId, bookingId }
             );
         }
     }
 
-    const orderTotal =
-        Number(order?.priceSummary?.total?.amount ?? 0) || 0;
+    const orderTotal = Number(order?.priceSummary?.total?.amount ?? 0) || 0;
 
     const lineItemsTotal = _getBookingLineItemsTotal(bookingLineItems);
 
@@ -521,7 +548,8 @@ async function _getValidatedPaidOrder(
     ) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Amount does not match the order.", { traceId }
+            "Amount does not match the order.",
+            { traceId }
         );
     }
 
@@ -539,19 +567,30 @@ async function _validatePaymentCitaSet(citas, orderId, traceId) {
         if (currentPaymentStatus === PAYMENT_STATUS.PAID) {
             throw createBookingError(
                 ERROR_CODES.INVALID_PAYLOAD,
-                "Booking is already paid.", { traceId, bookingId: cita.bookingId, orderId }
+                "Booking is already paid.",
+                { traceId, bookingId: cita.bookingId, orderId }
             );
         }
 
         if (currentPaymentStatus === PAYMENT_STATUS.REFUNDED) {
             throw createBookingError(
                 ERROR_CODES.INVALID_PAYLOAD,
-                "Booking has already been refunded.", { traceId, bookingId: cita.bookingId, orderId }
+                "Booking has already been refunded.",
+                { traceId, bookingId: cita.bookingId, orderId }
             );
         }
     }
 }
 
+/**
+ * CM-05: _setCitasPaymentState delega la escritura en _updateCitaSafe
+ * (bookingCore), que a su vez escribe a BOOKING_FIELDS.STATUS
+ * (bookingStatus en v20.2). La cita se actualiza con:
+ *   - bookingStatus: BOOKING_STATUS.CONFIRMED
+ *   - paymentStatus: PAYMENT_STATUS.PAID
+ *   - cashMovementId, orderId, traceId
+ *   - meta ampliada con los mismos campos mas fechaConfirmacionPago
+ */
 async function _setCitasPaymentState(
     citas,
     paymentState,
@@ -565,7 +604,8 @@ async function _setCitasPaymentState(
         if (!bookingId) {
             throw createBookingError(
                 ERROR_CODES.INVALID_PAYLOAD,
-                "Booking identifier is missing.", { traceId }
+                "Booking identifier is missing.",
+                { traceId }
             );
         }
 
@@ -610,25 +650,33 @@ async function _setCitasPaymentState(
  */
 async function _assertBookingOwner(cita, traceId) {
     if (!cita) {
-        throw createBookingError(ERROR_CODES.AUTH_REQUIRED, "Booking was not found.", {
-            traceId,
-        });
+        throw createBookingError(
+            ERROR_CODES.AUTH_REQUIRED,
+            "Booking was not found.",
+            { traceId }
+        );
     }
 
     return true;
 }
 
-// C6: sin alias start/end; solo startDate/endDate canonicos.
+/**
+ * CM-01: lee los campos fisicos reales de CitasF2.
+ *   slotStart / slotEnd (BOOKING_FIELDS.SLOT_START / SLOT_END).
+ * Antes leia startDate / endDate que NO existen en la coleccion.
+ */
 function _getBookingSlotFromCita(cita) {
     return {
         serviceId: _safeTrim(cita?.serviceId),
         resourceId: _safeTrim(cita?.resourceId),
-        startDate: cita?.startDate || null,
-        endDate: cita?.endDate || null,
+        startDate: cita?.[BOOKING_FIELDS.SLOT_START] || null,
+        endDate: cita?.[BOOKING_FIELDS.SLOT_END] || null,
     };
 }
 
-// C6: sin alias start/end; solo localStartDate/localEndDate canonicos.
+/**
+ * C6: sin alias start/end; solo localStartDate/localEndDate canonicos.
+ */
 function _getDualSlotInput(payload, key) {
     const slot = payload?.[key];
 
@@ -644,7 +692,9 @@ function _getDualSlotInput(payload, key) {
 function _matchesCitaPairIdentifier(cita, token) {
     const meta = _getCitaMeta(cita);
 
-    const pairToken = _safeTrim(cita?.pairToken || meta.pairToken);
+    const pairToken = _safeTrim(
+        cita?.[BOOKING_FIELDS.PAIR_TOKEN] || meta.pairToken
+    );
 
     return pairToken === _safeTrim(token);
 }
@@ -685,7 +735,8 @@ async function _loadServiceConfigForCita(cita, traceId) {
     if (!serviceId) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Booking service is missing.", { traceId }
+            "Booking service is missing.",
+            { traceId }
         );
     }
 
@@ -694,7 +745,8 @@ async function _loadServiceConfigForCita(cita, traceId) {
     if (result?.status !== "SUCCESS" || !result?.data) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Booking service configuration was not found.", { traceId }
+            "Booking service configuration was not found.",
+            { traceId }
         );
     }
 
@@ -714,20 +766,20 @@ async function _revalidateDualInputSlots(
     if (!slotF1Input?.localStartDate || !slotF1Input?.localEndDate) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "F1 slot dates are required.", { traceId }
+            "F1 slot dates are required.",
+            { traceId }
         );
     }
 
     if (!slotF2Input?.localStartDate || !slotF2Input?.localEndDate) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "F2 slot dates are required.", { traceId }
+            "F2 slot dates are required.",
+            { traceId }
         );
     }
 
-    // C3: BOOKING_TYPE.DUAL_F2 (ADR-17 SNAKE_CASE). El valor anterior
-    // DUALF2 no existia en el enum canonico y hacia fallar silenciosamente
-    // la identificacion de fases duales.
+    // C3: BOOKING_TYPE.DUAL_F2 (ADR-17 SNAKE_CASE).
     const f1Cita =
         citas.find((cita) => {
             const meta = _getCitaMeta(cita);
@@ -751,7 +803,8 @@ async function _revalidateDualInputSlots(
     if (!f1Cita || !f2Cita) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Both dual booking phases are required.", { traceId }
+            "Both dual booking phases are required.",
+            { traceId }
         );
     }
 
@@ -769,14 +822,16 @@ async function _revalidateDualInputSlots(
     if (f1ResourceId && f2ResourceId && f1ResourceId !== f2ResourceId) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Dual phases must use the same staff member.", { traceId }
+            "Dual phases must use the same staff member.",
+            { traceId }
         );
     }
 
     const selectedResourceId = f1ResourceId || f2ResourceId || null;
 
-    const f1Addons = _getNativeAddonIdsForRevalidation(f1Cita);
-    const f2Addons = _getNativeAddonIdsForRevalidation(f2Cita);
+    // CM-02: lectura canonica via _getAddOnIdsForRevalidation.
+    const f1Addons = _getAddOnIdsForRevalidation(f1Cita);
+    const f2Addons = _getAddOnIdsForRevalidation(f2Cita);
 
     const f1Result = await revalidateExactAvailabilitySlot({
         serviceId: f1ServiceId,
@@ -790,7 +845,8 @@ async function _revalidateDualInputSlots(
     if (f1Result?.status !== "SUCCESS") {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "F1 slot is no longer available.", { traceId }
+            "F1 slot is no longer available.",
+            { traceId }
         );
     }
 
@@ -806,7 +862,8 @@ async function _revalidateDualInputSlots(
     if (f2Result?.status !== "SUCCESS") {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "F2 slot is no longer available.", { traceId }
+            "F2 slot is no longer available.",
+            { traceId }
         );
     }
 
@@ -820,7 +877,8 @@ async function _revalidateDualInputSlots(
     if (!range || !f2StartUtc) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Dual slot dates are invalid.", { traceId }
+            "Dual slot dates are invalid.",
+            { traceId }
         );
     }
 
@@ -829,7 +887,8 @@ async function _revalidateDualInputSlots(
     if (f2StartUtc.getTime() < f1EndUtc.getTime()) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "F2 must start after F1.", { traceId }
+            "F2 must start after F1.",
+            { traceId }
         );
     }
 
@@ -838,7 +897,8 @@ async function _revalidateDualInputSlots(
     if (gapMinutes > MAX_DUAL_GAP_MINUTES) {
         throw createBookingError(
             ERROR_CODES.INVALID_PAYLOAD,
-            "Gap between F1 and F2 exceeds the maximum allowed.", { traceId, gapMinutes, maxGap: MAX_DUAL_GAP_MINUTES }
+            "Gap between F1 and F2 exceeds the maximum allowed.",
+            { traceId, gapMinutes, maxGap: MAX_DUAL_GAP_MINUTES }
         );
     }
 
