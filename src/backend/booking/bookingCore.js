@@ -1,7 +1,7 @@
 /*
 MODULE: backend/booking/bookingCore.js
-VERSION: v5010.11-CORE20-SYNTAX
-BASE: v5010.10-PAIRTOKEN-REEXPORT + CORE-20 + SYNTAX RECOVERY
+VERSION: v5011-ALIGNED
+BASE: v5010.11-CORE20-SYNTAX + alineacion contrato add-ons CMS
 RESPONSIBILITY: Primitivas atomicas de reserva (simple y dual con gap) sobre
                 Bookings Writer V2: locks, idempotencia, persistencia CitasF2,
                 proyeccion de slots y traduccion de enums en frontera.
@@ -9,31 +9,35 @@ STANDARDS: G10 ASCII estricto. Sin Node builtins.
 CONTRATO: Reserva dual = DOS createBooking independientes unidos por pairToken.
           Multiservice Booking PROHIBIDO (BIBLIA 3.6).
 
-FIXES v5010.11:
-  CORE-20 (P0) CMS enums eliminados como definicion local. Se importan
-         CITAS_BOOKING_STATUS/CITAS_PAYMENT_STATUS desde internalConfig y se
-         reexportan como CMS_BOOKING_STATUS/CMS_PAYMENT_STATUS para preservar
-         la superficie publica historica. Cero duplicacion (BIBLIA §0.5.1).
-  SYNTAX (P0) Recuperacion completa de sintaxis corrupta del adjunto v5010.10:
-         - Especificadores de modulo con espacio final (9 imports rotos)
-         - BOOKING _FIELDS -> BOOKING_FIELDS en import
-         - ERROR_CODES: 26 literales con espacio final
-         - WIX_TO_CMS_*, WIX_NATIVE_*: todos los valores con espacio final
-         - _parsePayloadJson: safeTrim -> _safeTrim, catch () -> catch (_)
-         - generateSlotKey: safeTrim -> _safeTrim, formato "slot_" con guiones
-         - parseResourceIdFromSlotKey -> _parseResourceIdFromSlotKey (prefijo _)
-         - Parser: .split("") -> .split("_"), partes[0] !== "slot"
-         - buildLockKeys -> _buildLockKeys (prefijo _)
-         - _persistBooking: normalizeMeta -> _normalizeMeta
-         - _forceStaffInPristineSlot: <= sin espacio
-         - Bloques 15-18: & & -> &&
-         - Todos los demas identificadores partidos y literales con trailing space
+FIXES APLICADOS v5011-ALIGNED:
+  CORE-21 (P0): _forceStaffInPristineSlot YA NO inyecta addOnIds ni
+                selectedAddOns dentro del slot. Wix Bookings Writer V2 ignora
+                silenciosamente esos campos en el slot; el contrato oficial
+                exige bookedAddOns a NIVEL RAIZ del body de createBooking.
+  CORE-22 (P0): _projectWriterSlotFromAvailability YA NO inyecta addOnIds ni
+                selectedAddOns dentro del slot. Mismo motivo que CORE-21.
+  CORE-23 (P0): nuevo helper exportado _buildBookedAddOns(addOnIds) que
+                devuelve [{ addOnId }, ...] listo para el body de createBooking.
+                Consumidor: bookingSaga.js (paso CreateBookings).
+  CORE-24 (P1): _extractAddonIdsFromSlot eliminado. Ya no se usa: los add-ons
+                viajan por el contrato raiz, no por el slot.
+  CORE-25 (P1): import de colecciones migrado a COLLECTIONS. BUSINESS_COLLECTIONS
+                se mantiene como alias en internalConfig v20.2 por compatibilidad,
+                pero el modulo importa el canonico.
+
+FIXES HEREDADOS v5010.11:
+  CORE-20 (P0): CMS enums reexportados desde internalConfig.
+  SYNTAX (P0): Recuperacion completa de sintaxis corrupta del adjunto v5010.10.
 
 FIXES HEREDADOS v5010.9/v5010.8:
   CORE-08..CORE-17: sintaxis, suppressHooks, CitasF2 schema, enums frontera,
   ControlOperativo canonico, slot key 5 piezas, hasSome, ranking CMS, contrato
   retorno transaccion, CONTROL_TYPE.IDEMPOTENCY.
   CORE-18: _buildPairTokenDeterministic reexportado desde bookingUtils.
+
+PENDIENTES (fuera de este pase):
+  - Migracion de dataLegacyAdapter a backend/dataAccess. Requiere conocer la
+    API completa de mutations del DAL (insert/update/remove/get elevados).
 =============================================================================
 */
 
@@ -45,7 +49,7 @@ import { getStaffScheduleId } from "backend/staff";
 import { logger } from "backend/logger";
 import { assertValidEnum } from "backend/validation";
 import {
-    BUSINESS_COLLECTIONS,
+    COLLECTIONS,
     OPERATIONAL_COLLECTIONS,
     CONTROL_TYPE,
     CONCURRENCY,
@@ -56,8 +60,6 @@ import {
     API,
     PAYMENT_STATUS,
     BOOKING_FIELDS,
-    // CORE-20: contrato de persistencia de CitasF2 definido en internalConfig.
-    // bookingCore reexporta bajo nombres historicos; NUNCA redefine.
     CITAS_BOOKING_STATUS,
     CITAS_PAYMENT_STATUS
 } from "backend/internalConfig";
@@ -119,19 +121,9 @@ export const ERROR_CODES = Object.freeze({
 // BLOQUE 2 - ENUMS EN FRONTERA: WIX NATIVO <-> CMS PERSISTIDO (CORE-11/20)
 // =============================================================================
 
-/**
- * CORE-20: reexport del contrato canonico definido en internalConfig (BIBLIA §6.2).
- * Se conservan los nombres historicos CMS_BOOKING_STATUS y CMS_PAYMENT_STATUS
- * porque bookingSaga, citasManager y los tests los consumen.
- * Cero duplicacion: una sola fuente de verdad (BIBLIA §0.5.1).
- */
 export const CMS_BOOKING_STATUS = CITAS_BOOKING_STATUS;
 export const CMS_PAYMENT_STATUS = CITAS_PAYMENT_STATUS;
 
-/**
- * Traduccion hacia el enum persistido. Claves: enum nativo Wix (BIBLIA §6.1)
- * mas alias ES tolerados SOLO en entrada (Matriz §2).
- */
 const WIX_TO_CMS_BOOKING_STATUS = Object.freeze({
     CREATED: CITAS_BOOKING_STATUS.PENDING,
     PENDING: CITAS_BOOKING_STATUS.PENDING,
@@ -175,7 +167,6 @@ const WIX_TO_CMS_PAYMENT_STATUS = Object.freeze({
     EXENTO: CITAS_PAYMENT_STATUS.PAID
 });
 
-/** Devuelve "" ante valor desconocido: assertValidEnum falla de forma explicita. */
 export function _toCmsBookingStatus(value) {
     const v = _safeTrim(value).toUpperCase();
     if (!v) return "";
@@ -188,10 +179,6 @@ export function _toCmsPaymentStatus(value) {
     return WIX_TO_CMS_PAYMENT_STATUS[v] || "";
 }
 
-/**
- * CORE-06: mapa inverso para la API de Wix. bookingSaga envia el SSOT espanol
- * y Wix solo acepta su enum nativo EN. Valores ya nativos pasan sin cambio.
- */
 const WIX_NATIVE_PAYMENT_STATUS = Object.freeze({
     UNDEFINED: PAYMENT_STATUS.UNDEFINED,
     NOT_PAID: PAYMENT_STATUS.NOT_PAID,
@@ -219,7 +206,6 @@ function _toWixNativePaymentStatus(value) {
     return WIX_NATIVE_PAYMENT_STATUS[v] || value;
 }
 
-/** Estado por defecto cuando el llamante no lo fija. */
 function _deriveCmsBookingStatus(cmsPaymentStatus) {
     return cmsPaymentStatus === CITAS_PAYMENT_STATUS.UNPAID
         ? CITAS_BOOKING_STATUS.PENDING
@@ -235,10 +221,6 @@ export const getCheckoutUrlElevated = auth.elevate(checkout.getCheckoutUrl);
 
 const _confirmOrDeclineElevatedRaw = auth.elevate(bookings.confirmOrDeclineBooking);
 
-/**
- * CORE-06: wrapper elevado que traduce paymentStatus del SSOT al enum nativo
- * que acepta Wix Bookings. Contrato: (bookingId, options) -> respuesta elevada.
- */
 export async function confirmOrDeclineBookingElevated(bookingId, options) {
     let normalizedOptions = options;
     if (options && typeof options === "object" && options.paymentStatus !== undefined) {
@@ -375,23 +357,28 @@ export async function _resolveScheduleIdForResource(resourceId, sourceSlot) {
 }
 
 // =============================================================================
-// BLOQUE 7 - NORMALIZACION DE SLOTS PARA WRITER V2 (CORE-02, CORE-04)
+// BLOQUE 7 - CONSTRUCCION DEL BODY DE CREATEBOOKING (Writer V2)
 // =============================================================================
 
-function _extractAddonIdsFromSlot(slot) {
-    const source = (slot && typeof slot === "object") ? slot : {};
-    const customerChoices = (source.customerChoices && typeof source.customerChoices === "object")
-        ? source.customerChoices
-        : {};
-    const candidates = [].concat(
-        Array.isArray(source.addOnIds) ? source.addOnIds : [],
-        Array.isArray(source.selectedAddOns) ? source.selectedAddOns : [],
-        Array.isArray(customerChoices.addOnIds) ? customerChoices.addOnIds : []
-    );
-    const clean = candidates
+/**
+ * CORE-23: transforma una lista de addOnIds (GUIDs de ComplementosCatalogo)
+ * al array de objetos que consume la API de Wix Bookings en el body de
+ * createBooking, a NIVEL RAIZ:
+ *
+ *   bookings.createBooking({
+ *     bookedEntity: { slot: {...} },
+ *     bookedAddOns: [{ addOnId: "..." }, ...],  <- RAIZ, no en el slot
+ *     ...
+ *   })
+ *
+ * Devuelve [] si no hay add-ons. Filtra GUIDs invalidos.
+ */
+export function _buildBookedAddOns(addOnIds) {
+    if (!Array.isArray(addOnIds) || addOnIds.length === 0) return [];
+    return addOnIds
         .map(function (id) { return _safeTrim(id); })
-        .filter(function (id) { return _looksLikeGuid(id); });
-    return Array.from(new Set(clean));
+        .filter(function (id) { return _looksLikeGuid(id); })
+        .map(function (id) { return { addOnId: id }; });
 }
 
 function _toMadridLocalString(rawValue) {
@@ -413,8 +400,16 @@ function _toMadridLocalString(rawValue) {
 const CONFIGURED_LOCATION_ID = _safeTrim(SDK_CONFIG && SDK_CONFIG.LOCATION_ID);
 
 /**
- * Construye el objeto bookingInfo que exige Bookings Writer V2 (BIBLIA 2.2.1/3.3):
- * timezone minusculas, locationType OWNER_BUSINESS. Null ante dato no certificable.
+ * CORE-21: construye el objeto bookingInfo que exige Bookings Writer V2
+ * (BIBLIA 2.2.1/3.3). YA NO inyecta addOnIds ni selectedAddOns dentro del
+ * slot: los add-ons viajan por bookedAddOns a nivel raiz del body (ver
+ * _buildBookedAddOns en bookingSaga).
+ *
+ * Contrato devuelto: { serviceId, scheduleId, startDate (ISO UTC con Z),
+ * endDate (ISO UTC con Z), timezone (Europe/Madrid), resource: { id },
+ * location: { id, locationType: OWNER_BUSINESS } }.
+ *
+ * Null ante dato no certificable (fail-closed).
  */
 export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverride, defaultDurationMinutes) {
     if (!slot || typeof slot !== "object") return null;
@@ -491,7 +486,8 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
     );
     if (!locationType || locationType === "BUSINESS") locationType = "OWNER_BUSINESS";
 
-    const result = {
+    // CORE-21: sin addOnIds ni selectedAddOns dentro del slot.
+    return {
         serviceId: serviceId,
         scheduleId: scheduleId,
         startDate: startDate.toISOString(),
@@ -500,13 +496,6 @@ export async function _forceStaffInPristineSlot(slot, resourceId, serviceIdOverr
         resource: { id: resourceIdClean },
         location: { id: locationId, locationType: locationType }
     };
-
-    const addOnIds = _extractAddonIdsFromSlot(slot);
-    if (addOnIds.length > 0) {
-        result.addOnIds = addOnIds.slice();
-        result.selectedAddOns = addOnIds.slice();
-    }
-    return result;
 }
 
 // =============================================================================
@@ -880,7 +869,7 @@ export async function _failTransaction(pairToken, errorMessage) {
 // =============================================================================
 // BLOQUE 12 - PERSISTENCIA EN CITAS_F2 (CORE-09/10/11)
 // =============================================================================
-const CITAS_COL = BUSINESS_COLLECTIONS.CITAS_F2;
+const CITAS_COL = COLLECTIONS.CITAS_F2;
 
 function _minimizeContactDetails(contactDetails) {
     const cd = (contactDetails && typeof contactDetails === "object") ? contactDetails : {};
@@ -1189,6 +1178,11 @@ export function _projectCertifiedSlot(slot, resourceId) {
     };
 }
 
+/**
+ * CORE-22: _projectWriterSlotFromAvailability YA NO inyecta addOnIds ni
+ * selectedAddOns dentro del slot. El consumidor (bookingSaga) construye
+ * bookedAddOns a nivel raiz del body de createBooking.
+ */
 export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) {
     const projected = _projectCertifiedSlot(slot, resourceId);
     if (!projected) return null;
@@ -1213,7 +1207,7 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
     );
     if (!writerLocationType || writerLocationType === "BUSINESS") writerLocationType = "OWNER_BUSINESS";
 
-    const writerSlot = {
+    return {
         serviceId: finalServiceId,
         scheduleId: scheduleId,
         startDate: projected.startDate,
@@ -1222,22 +1216,11 @@ export function _projectWriterSlotFromAvailability(slot, resourceId, serviceId) 
         resource: { id: projected.resourceId },
         location: { id: projected.locationId, locationType: writerLocationType }
     };
-
-    const addOnIds = _extractAddonIdsFromSlot(slot);
-    if (addOnIds.length > 0) {
-        writerSlot.addOnIds = addOnIds.slice();
-        writerSlot.selectedAddOns = addOnIds.slice();
-    }
-    return writerSlot;
 }
 
 // =============================================================================
 // BLOQUE 17 - PAIR TOKEN CANONICO (CORE-05 + CORE-18)
 // =============================================================================
-/**
- * CORE-18: definicion canonica en bookingUtils. Aqui solo se reexporta.
- * Cero duplicacion (BIBLIA §0.5.1).
- */
 export { _buildPairFingerprint, _buildPairTokenDeterministic };
 
 // =============================================================================
